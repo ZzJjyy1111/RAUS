@@ -97,7 +97,7 @@ class TrajectoryClient:
         self.load_srv = rospy.ServiceProxy("controller_manager/load_controller", LoadController)
         self.list_srv = rospy.ServiceProxy("controller_manager/list_controllers", ListControllers)
         
-        self.wrench_topic = rospy.Subscriber("/wrench", geometry_msgs.WrenchStamped, self.wrench_callback, queue_size=10)
+        self.wrench_topic = rospy.Subscriber("/wrench1", geometry_msgs.WrenchStamped, self.wrench_callback, queue_size=10)
         self.tf_topic = rospy.Subscriber("/tf", tf2_msgs.TFMessage, self.tf_callback, queue_size=10)
         try:
             self.switch_srv.wait_for_service(timeout.to_sec())
@@ -139,14 +139,14 @@ class TrajectoryClient:
         M = np.diag([1.0, 1.0, 1.0])
         D = np.diag([100, 100, 100])
         K = np.diag([800, 800, 800])
-        rate = rospy.Rate(100)
+        rate = rospy.Rate(20)
         timeout = rospy.Duration(5)
         if not trajectory_client.wait_for_server(timeout):
             rospy.logerr("Could not reach controller action server.")
             sys.exit(-1)
         rospy.loginfo("reduce the height and make the orientation correct")
 
-        get_traj_result = self.get_trajectory(self.end_transl, [self.end_transl[0],self.end_transl[1],self.end_transl[2]-0.2])
+        get_traj_result = self.get_trajectory(self.end_transl, [self.end_transl[0],self.end_transl[1],self.end_transl[2]-0.05])
         for i in range(get_traj_result[0]):
             point = CartesianTrajectoryPoint()
             point.pose = get_traj_result[1][i]
@@ -158,38 +158,51 @@ class TrajectoryClient:
             rospy.loginfo("position:{}".format(goal.trajectory.points[i].pose))
             rospy.loginfo("time:{}".format(goal.trajectory.points[i].time_from_start))
         trajectory_client.send_goal(goal)
+        print("send successfully")
         trajectory_client.wait_for_result()
+        print("waiting end")
         result = trajectory_client.get_result()
        
-       
+        rospy.sleep(5)
         rospy.loginfo("admittance control begin")
-        # iter = 0
-        # while not rospy.is_shutdown():
-        #     iter += 1
-        #     f_error = self.f_desired - self.end_force
-        #     acc = np.linalg.inv(M).dot((f_error - D.dot(f_error) - K.dot(f_error)))
-        #     velo = np.zeros(3)
-        #     posi = np.zeros(3)
-        #     posi += velo/100
-        #     velo += acc/100
+        iter = 0
+        f_desired = 0
+        posi_desired = self.end_transl.copy()
+        acc_last = np.zeros(3)
+        v_error = np.zeros(3)
+        p_error = np.zeros(3)
+        v_error_last = np.zeros(3)
+        p_error_last = np.zeros(3)
 
-        #     goal.trajectory.points = []
-        #     posi_t = posi + self.end_transl
-            
-        #     get_traj_result = self.get_trajectory(self.end_transl, posi_t)
-        #     for i in range(get_traj_result[0]):
-        #         point = CartesianTrajectoryPoint()
-        #         point.pose = get_traj_result[1][i]
-        #         point.time_from_start = get_traj_result[2][i]
-        #         goal.trajectory.points.append(point)
-        #     trajectory_client.send_goal(goal)
-        #     trajectory_client.wait_for_result()
-        #     result = trajectory_client.get_result()
-        #     if not result.error_code == 1:
-        #         break
-        #     rate.sleep()
-        # rospy.loginfo("admittance control breaks when iteration {}".format(iter))
-        # rospy.loginfo("error state {}".format(result.error_code))
+        while not rospy.is_shutdown():
+            iter += 1
+            f_error = -f_desired + self.end_force
+            acc = np.linalg.inv(M).dot((f_error - D.dot(v_error_last) - K.dot(p_error_last)))
+            v_error = v_error_last + acc_last/20
+            p_error = p_error_last + v_error_last/20
+            f_error = f_desired - self.end_force
+
+
+            goal.trajectory.points = []
+            posi_t = p_error + posi_desired
+            print("posi_t:",posi_t)
+            get_traj_result = self.get_trajectory(self.end_transl, posi_t)
+            for i in range(get_traj_result[0]):
+                point = CartesianTrajectoryPoint()
+                point.pose = get_traj_result[1][i]
+                point.time_from_start = get_traj_result[2][i]
+                goal.trajectory.points.append(point)
+            trajectory_client.send_goal(goal)
+            trajectory_client.wait_for_result()
+            result = trajectory_client.get_result()
+            if not result.error_code == 0:
+                break
+            acc_last = acc
+            v_error_last = v_error
+            p_error_last = p_error
+            rate.sleep()
+        rospy.loginfo("admittance control breaks when iteration {}".format(iter))
+        rospy.loginfo("error state {}".format(result.error_code))
 
     def get_trajectory(self,start_pose,final_pose):
         pose_num = int(max(abs(final_pose-start_pose))/0.002)

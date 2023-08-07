@@ -29,6 +29,7 @@ import sys
 
 import rospy
 import actionlib
+from inverseKinematicsUR5 import InverseKinematicsUR5, transformRobotParameter
 from control_msgs.msg import FollowJointTrajectoryAction, FollowJointTrajectoryGoal
 from trajectory_msgs.msg import JointTrajectoryPoint
 from controller_manager_msgs.srv import SwitchControllerRequest, SwitchController
@@ -105,20 +106,19 @@ class TrajectoryClient:
         self.end_rot = np.zeros(4)
         self.end_force = np.zeros(3)
         self.end_torque = np.zeros(3)
-        self.f_desired = np.zeros(3)
         self.jsp = np.zeros(6)
         self.jsv = np.zeros(6)
         self.jse = np.zeros(6)
         timeout = rospy.Duration(10)
+        self.control_rate = 1000
         self.switch_srv = rospy.ServiceProxy(
             "controller_manager/switch_controller", SwitchController
         )
         self.load_srv = rospy.ServiceProxy("controller_manager/load_controller", LoadController)
         self.list_srv = rospy.ServiceProxy("controller_manager/list_controllers", ListControllers)
         self.js_topic = rospy.Subscriber("/joint_states", sensor_msgs.JointState, self.js_callback, queue_size=10)
-        self.wrench_topic = rospy.Subscriber("/wrench", geometry_msgs.WrenchStamped, self.wrench_callback, queue_size=10)
+        self.wrench_topic = rospy.Subscriber("/wrench1", geometry_msgs.WrenchStamped, self.wrench_callback, queue_size=10)
         self.tf_topic = rospy.Subscriber("/tf", tf2_msgs.TFMessage, self.tf_callback, queue_size=10)
-  
         try:
             self.switch_srv.wait_for_service(timeout.to_sec())
         except rospy.exceptions.ROSException as err:
@@ -147,9 +147,9 @@ class TrajectoryClient:
             self.end_rot[3] = end_tf.transforms[0].transform.rotation.w
 
     def js_callback(self,joint_states):
-        self.jsp[0:-1] = joint_states.position[0:-1]
-        self.jsv[0:-1] = joint_states.velocity[0:-1]
-        self.jse[0:-1] = joint_states.effort[0:-1]
+        self.jsp = joint_states.position
+        self.jsv = joint_states.velocity
+        self.jse = joint_states.effort
     
     
     def admittance_control(self):
@@ -162,89 +162,76 @@ class TrajectoryClient:
             "{}/follow_joint_trajectory".format(self.joint_trajectory_controller),
             FollowJointTrajectoryAction,
         )
-        M = np.diag([1.0, 1.0, 1.0])
-        D = np.diag([100, 100, 100])
+        M = np.diag([2, 2, 2])
+        D = np.diag([72, 72, 72])
         K = np.diag([800, 800, 800])
-        rate = rospy.Rate(100)
+        rate = rospy.Rate(self.control_rate)
         timeout = rospy.Duration(5)
         if not trajectory_client.wait_for_server(timeout):
             rospy.logerr("Could not reach controller action server.")
             sys.exit(-1)
         rospy.loginfo("reduce the height and make the orientation correct")
-        final_pose = np.zeros((3,4))
-        # print(np.asarray([self.end_transl[0],self.end_transl[1],self.end_transl[2]-0.2]))
-        # print(final_pose)
-        # print(final_pose[0:3,3])
-        final_pose[0:3,3] = np.asarray([self.end_transl[0],self.end_transl[1],self.end_transl[2]-0.1])
+        final_pose = np.zeros((4,4))
+        final_pose[0:3,3] = np.asarray([self.end_transl[0],self.end_transl[1],self.end_transl[2]-0.05])
         final_pose[0:3,0:3] = np.asarray([[1,0,0],[0,-1,0],[0,0,-1]])
-        print(final_pose)
+        final_pose[3,0:4] = np.asarray([0,0,0,1])
         get_traj_result = self.get_trajectory(self.jsp, final_pose)
         for i in range(get_traj_result[0]):
             point = JointTrajectoryPoint()
             point.positions = get_traj_result[1][i]
             point.time_from_start = get_traj_result[2][i]
             goal.trajectory.points.append(point)
-            
-        # for i in range(len(goal.trajectory.points)):
-        #     rospy.loginfo("number:{}".format(i))
-        #     rospy.loginfo("position:{}".format(goal.trajectory.points[i].pose))
-        #     rospy.loginfo("time:{}".format(goal.trajectory.points[i].time_from_start))
         trajectory_client.send_goal(goal)
         trajectory_client.wait_for_result()
         result = trajectory_client.get_result()
-       
-       
-        # rospy.loginfo("admittance control begin")
-        # iter = 0
-        # while not rospy.is_shutdown():
-        #     iter += 1
-        #     f_error = self.f_desired - self.end_force
-        #     acc = np.linalg.inv(M).dot((f_error - D.dot(f_error) - K.dot(f_error)))
-        #     velo = np.zeros(3)
-        #     posi = np.zeros(3)
-        #     posi += velo/100
-        #     velo += acc/100
-
-        #     goal.trajectory.points = []
-        #     posi_t = posi + self.end_transl
-        #     final_pose[0:3,3] = posi_t.T
-        #     final_pose[0:3,0:3] = np.asarray([[1,0,0],[0,-1,-1],[0,0,-1]])
-        #     get_traj_result = self.get_trajectory(self.jsp,final_pose)
-        #     for i in range(get_traj_result[0]):
-        #         point = CartesianTrajectoryPoint()
-        #         point.pose = get_traj_result[1][i]
-        #         point.time_from_start = get_traj_result[2][i]
-        #         goal.trajectory.points.append(point)
-        #     trajectory_client.send_goal(goal)
-        #     trajectory_client.wait_for_result()
-        #     result = trajectory_client.get_result()
-        #     if not result.error_code == 1:
-        #         break
-        #     rate.sleep()
-        # rospy.loginfo("admittance control breaks when iteration {}".format(iter))
-        # rospy.loginfo("error state {}".format(result.error_code))
+        rospy.sleep(5)
+        rospy.loginfo("admittance control begin")
+        iter = 0
+        f_desired = 0
+        posi_desired = self.end_transl.copy()
+        acc_last = np.zeros(3)
+        v_error = np.zeros(3)
+        p_error = np.zeros(3)
+        v_error_last = np.zeros(3)
+        p_error_last = np.zeros(3)
+        final_pose[0:3,0:3] = np.asarray([[1,0,0],[0,-1, 0],[0,0,-1]])
+        final_pose[3,0:4] = np.asarray([0,0,0,1])
+        while not rospy.is_shutdown():
+            iter += 1
+            f_error = - f_desired + self.end_force
+            acc = np.linalg.inv(M).dot((f_error - D.dot(v_error_last) - K.dot(p_error_last)))
+            v_error = v_error_last + acc_last/self.control_rate
+            p_error = p_error_last + v_error_last/self.control_rate
+            goal.trajectory.points = []
+            posi_t = p_error + posi_desired
+            final_pose[0:3,3] = posi_t.T
+            get_traj_result = self.get_trajectory(self.jsp,final_pose)
+            if not get_traj_result[0] == 0:
+                for i in range(get_traj_result[0]):
+                    point = JointTrajectoryPoint()
+                    point.positions = get_traj_result[1][i]
+                    point.time_from_start = get_traj_result[2][i]
+                    goal.trajectory.points.append(point)
+                trajectory_client.send_goal(goal)
+            acc_last = acc
+            v_error_last = v_error
+            p_error_last = p_error
+            rate.sleep()
+        rospy.loginfo("admittance control breaks when iteration {}".format(iter))
+        rospy.loginfo("error state {}".format(result.error_code))
 
     def get_trajectory(self,start_js,final_pose):
         theta0 = [start_js[2],start_js[1],start_js[0],start_js[3],start_js[4],start_js[5]]
-        pose = self.ur5e_kin.forward(theta0)
-        pose = np.asarray(pose).reshape(3,4)
-        print("final_pose",final_pose.reshape(-1).tolist())
-        joint_configs = self.ur5e_kin.inverse(final_pose.reshape(-1).tolist())
-        print(joint_configs)
-        n_solu = int(len(joint_configs))/6
-        print(n_solu)
-        joint_configs = np.asarray(joint_configs).reshape(n_solu,6)
-        min = 10000
-        best_config = np.zeros(6)
-        for joint_config in joint_configs:
-            if np.sum(np.abs(joint_config-theta0).multiply(np.asarray([10,10,10,1,1,1]))) < min:
-                min = np.sum(np.abs(joint_config-theta0))
-                best_config = joint_config
-        t_max = int(np.max(np.abs(best_config-theta0))/0.2)
+        joint_weights = [10,8,8,2,2,1]
+        ik = InverseKinematicsUR5()
+        ik.setJointWeights(joint_weights)
+        ik.setJointLimits(-np.pi, np.pi)
+        best_config = ik.findClosestIK(final_pose,theta0)
+        t_max = int(np.max(np.abs(best_config-theta0))/0.005)
         duration_list = []
         position_list = []
         for i in range(t_max):
-            duration_list.append(rospy.Duration(i+1))
+            duration_list.append(rospy.Duration((i+1))/100.0)
             position_list.append((best_config-theta0)/t_max*(i+1)+theta0)
         return [t_max,position_list,duration_list]
 

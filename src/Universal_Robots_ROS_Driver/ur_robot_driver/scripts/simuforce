@@ -1,0 +1,24 @@
+#!/usr/bin/env python
+import rospy
+import geometry_msgs.msg as geometry_msgs
+import numpy as np
+
+rospy.init_node('simuforce')
+wrench_pub = rospy.Publisher("/wrench1", geometry_msgs.WrenchStamped, queue_size=1)
+rate = rospy.Rate(100)
+i = 0
+A = 40
+while not rospy.is_shutdown(): 
+    simu_force = geometry_msgs.WrenchStamped()
+    # simu_force.wrench.force.z = A*np.sin(i*np.pi/2000)
+    simu_force.wrench.force.z = A
+    simu_force.wrench.force.y = 0
+    simu_force.wrench.force.x = 0
+    simu_force.wrench.torque.x = 0
+    simu_force.wrench.torque.y = 0
+    simu_force.wrench.torque.z = 0
+    wrench_pub.publish(simu_force)
+    i = i + 1
+    print("i:",i)
+    print("wrench:",simu_force.wrench.force.z)
+    rate.sleep()

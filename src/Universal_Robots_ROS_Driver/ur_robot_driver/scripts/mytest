@@ -121,9 +121,9 @@ class TrajectoryClient:
 
         # The following list are arbitrary positions
         # Change to your own needs if desired
-        position_list = [[0, -1.57, -1.57, 0, 0, 1.57]]
-        position_list.append([0.3,-1.2,-1.2,1.57,0,0])
-        position_list.append([0, -1.57, -1.57, 0, 0, 1.57])
+        position_list = [[-2.76553004,-2.19449322,-1.40785277,-1.11004277,1.57079629,1.73054127]]
+        position_list.append([-2.76553004,-2.19449322,-1.40785277,-1.11004277,1.57079629,1.73054127])
+        position_list.append([-2.76553004,-2.19449322,-1.40785277,-1.11004277,1.57079629,1.73054127])
         duration_list = [5.0,10.0,15,0]
         for i, position in enumerate(position_list):
             point = JointTrajectoryPoint()
