@@ -239,7 +239,7 @@ class TrajectoryClient:
             # print("f_error:",f_error)
             print("v_error:",v_error)
             # print("p_error:",p_error)
-            ang_vel = np.linalg.inv(getjacobi(self.jsp)).dot(np.asarray(v_error.tolist()+[0,0,0]).T).tolist()
+            ang_vel = np.linalg.pinv(getjacobi(self.jsp)).dot(np.asarray(v_error.tolist()+[0,0,0]).T).tolist()
             print("ang_vel:",ang_vel)
             msg = Float64MultiArray()
             msg.data = ang_vel
