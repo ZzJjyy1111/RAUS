@@ -39,7 +39,6 @@ import geometry_msgs.msg as geometry_msgs
 import tf2_msgs.msg as tf2_msgs
 import sensor_msgs.msg as sensor_msgs
 import numpy as np
-import ur5e_ikfast
 from cartesian_control_msgs.msg import (
     FollowCartesianTrajectoryAction,
     FollowCartesianTrajectoryGoal,
@@ -110,7 +109,7 @@ class TrajectoryClient:
         self.jsv = np.zeros(6)
         self.jse = np.zeros(6)
         timeout = rospy.Duration(10)
-        self.control_rate = 1000
+        self.control_rate = 250
         self.switch_srv = rospy.ServiceProxy(
             "controller_manager/switch_controller", SwitchController
         )
@@ -124,7 +123,6 @@ class TrajectoryClient:
         except rospy.exceptions.ROSException as err:
             rospy.logerr("Could not reach controller switch service. Msg: {}".format(err))
             sys.exit(-1)
-        self.ur5e_kin = ur5e_ikfast.PyKinematics()
         self.joint_trajectory_controller = JOINT_TRAJECTORY_CONTROLLERS[0]
         self.cartesian_trajectory_controller = CARTESIAN_TRAJECTORY_CONTROLLERS[0]
 
@@ -132,6 +130,7 @@ class TrajectoryClient:
         self.end_force[0] = end_wrench.wrench.force.x
         self.end_force[1] = end_wrench.wrench.force.y
         self.end_force[2] = end_wrench.wrench.force.z
+        self.end_corforce = qt2rot(self.end_rot).dot(self.end_force)
         self.end_torque[0] = end_wrench.wrench.torque.x
         self.end_torque[1] = end_wrench.wrench.torque.y
         self.end_torque[2] = end_wrench.wrench.torque.z
@@ -162,8 +161,8 @@ class TrajectoryClient:
             "{}/follow_joint_trajectory".format(self.joint_trajectory_controller),
             FollowJointTrajectoryAction,
         )
-        M = np.diag([2, 2, 2])
-        D = np.diag([72, 72, 72])
+        M = np.diag([8, 8, 8])
+        D = np.diag([100, 100, 100])
         K = np.diag([800, 800, 800])
         rate = rospy.Rate(self.control_rate)
         timeout = rospy.Duration(5)
@@ -172,7 +171,7 @@ class TrajectoryClient:
             sys.exit(-1)
         rospy.loginfo("reduce the height and make the orientation correct")
         final_pose = np.zeros((4,4))
-        final_pose[0:3,3] = np.asarray([self.end_transl[0],self.end_transl[1],self.end_transl[2]-0.05])
+        final_pose[0:3,3] = np.asarray([self.end_transl[0],self.end_transl[1],self.end_transl[2]+0.05])
         final_pose[0:3,0:3] = np.asarray([[1,0,0],[0,-1,0],[0,0,-1]])
         final_pose[3,0:4] = np.asarray([0,0,0,1])
         get_traj_result = self.get_trajectory(self.jsp, final_pose)
@@ -185,8 +184,7 @@ class TrajectoryClient:
         trajectory_client.wait_for_result()
         result = trajectory_client.get_result()
         rospy.sleep(5)
-        rospy.loginfo("admittance control begin")
-        iter = 0
+        iter = 4
         f_desired = 0
         posi_desired = self.end_transl.copy()
         acc_last = np.zeros(3)
@@ -197,11 +195,13 @@ class TrajectoryClient:
         final_pose[0:3,0:3] = np.asarray([[1,0,0],[0,-1, 0],[0,0,-1]])
         final_pose[3,0:4] = np.asarray([0,0,0,1])
         while not rospy.is_shutdown():
+            print("time:",rospy.Time.now().to_sec())
             iter += 1
-            f_error = - f_desired + self.end_force
+            f_error = - f_desired + self.end_corforce
             acc = np.linalg.inv(M).dot((f_error - D.dot(v_error_last) - K.dot(p_error_last)))
             v_error = v_error_last + acc_last/self.control_rate
             p_error = p_error_last + v_error_last/self.control_rate
+            # print("p_error:",p_error)
             goal.trajectory.points = []
             posi_t = p_error + posi_desired
             final_pose[0:3,3] = posi_t.T
@@ -227,11 +227,11 @@ class TrajectoryClient:
         ik.setJointWeights(joint_weights)
         ik.setJointLimits(-np.pi, np.pi)
         best_config = ik.findClosestIK(final_pose,theta0)
-        t_max = int(np.max(np.abs(best_config-theta0))/0.005)
+        t_max = int(np.max(np.abs(best_config-theta0))/0.01)
         duration_list = []
         position_list = []
         for i in range(t_max):
-            duration_list.append(rospy.Duration((i+1))/100.0)
+            duration_list.append(rospy.Duration((i+1))/5.0)
             position_list.append((best_config-theta0)/t_max*(i+1)+theta0)
         return [t_max,position_list,duration_list]
 

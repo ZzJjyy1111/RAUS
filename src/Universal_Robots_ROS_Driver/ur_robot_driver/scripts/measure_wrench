@@ -1,0 +1,31 @@
+#!/usr/bin/env python
+import rospy
+import geometry_msgs.msg as geometry_msgs
+import numpy as np
+
+def wrench_callback(end_wrench):
+    end_force[0] = end_wrench.wrench.force.x
+    end_force[1] = end_wrench.wrench.force.y
+    end_force[2] = end_wrench.wrench.force.z
+    end_torque[0] = end_wrench.wrench.torque.x
+    end_torque[1] = end_wrench.wrench.torque.y
+    end_torque[2] = end_wrench.wrench.torque.z
+
+
+rospy.init_node('measure_wrench')
+end_force = np.zeros(3)
+end_torque = np.zeros(3)
+force_sum = np.zeros(3)
+torque_sum = np.zeros(3)
+wrench_sub = rospy.Subscriber("/wrench1", geometry_msgs.WrenchStamped, wrench_callback, queue_size=10)
+rate = rospy.Rate(1000)
+i = 100000
+
+while i>0: 
+    force_sum = force_sum + end_force
+    torque_sum = torque_sum + end_torque
+    i -=1
+    rate.sleep()
+
+print("force_avrg:",force_sum/100000.0)
+print("torque_avrg:",torque_sum/100000.0)

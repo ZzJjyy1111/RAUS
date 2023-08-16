@@ -22,7 +22,7 @@ def transformDHParameter(a,d,alpha,theta):
 	return T
 
 def transformRobotParameter(theta):
-	d = [0.1625,0,0,0.1333,0.0997,0.0996]
+	d = [0.1625,0,0,0.1333,0.0997,0.2496]
 	a = [0,-0.425,-0.3922,0,0,0]
 	alpha = [pi/2,0,0,pi/2,-pi/2,0]
 	T = np.eye(4)
@@ -56,7 +56,7 @@ class InverseKinematicsUR5:
 		self.debug = False
 
 		# Robot DH parameter
-		self.d = [0.1625,0,0,0.1333,0.0997,0.0996]
+		self.d = [0.1625,0,0,0.1333,0.0997,0.2496]
 		self.a = [0,-0.425,-0.39225,0,0,0]
 		self.alpha = [pi/2,0,0,pi/2,-pi/2,0]
 

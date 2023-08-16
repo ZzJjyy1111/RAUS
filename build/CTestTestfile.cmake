@@ -7,6 +7,7 @@
 subdirs("gtest")
 subdirs("universal_robot/universal_robots")
 subdirs("Universal_Robots_ROS_Driver/ur_dashboard_msgs")
+subdirs("etherdaq_ros-master")
 subdirs("universal_robot/ur10_moveit_config")
 subdirs("universal_robot/ur10e_moveit_config")
 subdirs("universal_robot/ur16e_moveit_config")

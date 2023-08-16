@@ -1,0 +1,8 @@
+prefix=/home/zjy/catkin_ws/devel
+
+Name: optoforce_etherdaq_driver
+Description: Description of optoforce_etherdaq_driver
+Version: 1.0.0
+Cflags: -I/home/zjy/catkin_ws/src/etherdaq_ros-master/include
+Libs: -L${prefix}/lib -letherdaq_driver
+Requires: diagnostic_msgs diagnostic_updater geometry_msgs roscpp

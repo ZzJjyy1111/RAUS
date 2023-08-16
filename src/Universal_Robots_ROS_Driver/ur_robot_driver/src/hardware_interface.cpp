@@ -653,6 +653,9 @@ void HardwareInterface::read(const ros::Time& time, const ros::Duration& period)
       // Normal case
       speed_scaling_combined_ = speed_scaling_ * target_speed_fraction_;
     }
+
+    package_loss_flag_ = false;
+    //std::cout << package_loss_flag_ << std::endl;
   }
   else
   {
@@ -663,11 +666,27 @@ void HardwareInterface::read(const ros::Time& time, const ros::Duration& period)
     // reliable.
     // TODO: This doesn't seem too bad currently, but we have to keep this in mind, when we
     // implement trajectory execution strategies that require a less reliable network connection.
-    controller_reset_necessary_ = true;
+
+    // controller_reset_necessary_ = true;
+    // if (!non_blocking_read_)
+    // {
+    //   ROS_ERROR("Could not get fresh data package from robot");
+    // }
+
     if (!non_blocking_read_)
     {
-      ROS_ERROR("Could not get fresh data package from robot");
+      if (package_loss_flag_)
+      {
+        controller_reset_necessary_ = true;
+        ROS_ERROR("Could not get fresh data package from robot");
+      }
+      else
+      {
+        ROS_WARN("Connection unrealiable! Lost one RTDE package from robot!");
+      }
+      //std::cout << package_loss_flag_ << std::endl;
     }
+    package_loss_flag_ = true;
   }
 }
 

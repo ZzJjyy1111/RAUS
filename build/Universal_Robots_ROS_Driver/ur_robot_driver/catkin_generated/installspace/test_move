@@ -63,6 +63,7 @@ JOINT_TRAJECTORY_CONTROLLERS = [
     "pos_joint_traj_controller",
     "vel_joint_traj_controller",
     "forward_joint_traj_controller",
+    "joint_group_velocity_controller"
 ]
 
 # All of those controllers can be used to execute Cartesian trajectories.
@@ -96,7 +97,7 @@ class TrajectoryClient:
             rospy.logerr("Could not reach controller switch service. Msg: {}".format(err))
             sys.exit(-1)
 
-        self.joint_trajectory_controller = JOINT_TRAJECTORY_CONTROLLERS[0]
+        self.joint_trajectory_controller = JOINT_TRAJECTORY_CONTROLLERS[5]
         self.cartesian_trajectory_controller = CARTESIAN_TRAJECTORY_CONTROLLERS[0]
 
     def send_joint_trajectory(self):
@@ -187,6 +188,11 @@ class TrajectoryClient:
         rospy.loginfo(
             "Executing trajectory using the {}".format(self.cartesian_trajectory_controller)
         )
+        # for i in range(len(goal.trajectory.points)):
+        #     rospy.loginfo("number:{}".format(i))
+        #     rospy.loginfo("position:{}".format(goal.trajectory.points[i].pose))
+        #     rospy.loginfo("time:{}".format(goal.trajectory.points[i].time_from_start))
+
         trajectory_client.send_goal(goal)
         trajectory_client.wait_for_result()
 
@@ -269,6 +275,7 @@ class TrajectoryClient:
 
         srv = ListControllersRequest()
         response = self.list_srv(srv)
+        print(response)
         for controller in response.controller:
             if controller.name == target_controller and controller.state == "running":
                 return

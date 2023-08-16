@@ -12,7 +12,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.D
 // See the License for the specific language governing permissions and
 // limitations under the License.
 // -- END LICENSE BLOCK ------------------------------------------------
@@ -334,6 +334,7 @@ protected:
   ros::Publisher program_state_pub_;
 
   std::atomic<bool> controller_reset_necessary_;
+  std::atomic<bool> package_loss_flag_;
   bool controllers_initialized_;
 
   bool packet_read_;

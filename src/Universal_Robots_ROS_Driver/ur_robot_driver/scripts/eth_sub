@@ -1,0 +1,16 @@
+#!/usr/bin/env python
+
+import sys
+import rospy
+import geometry_msgs.msg as geometry_msgs
+
+def wrench_callback(self,end_wrench):
+    end_force[0] = end_wrench.wrench.force.x
+    end_force[1] = end_wrench.wrench.force.y
+    end_force[2] = end_wrench.wrench.force.z
+    end_torque[0] = end_wrench.wrench.torque.x
+    end_torque[1] = end_wrench.wrench.torque.y
+    end_torque[2] = end_wrench.wrench.torque.z
+
+rospy.init_node("eth_sub")
+wrench_topic = rospy.Subscriber("/ethdag", geometry_msgs.WrenchStamped, self.wrench_callback, queue_size=10)
