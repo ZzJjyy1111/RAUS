@@ -174,62 +174,20 @@ class TrajectoryClient:
         pub=rospy.Publisher('/joint_group_vel_controller/command', Float64MultiArray, queue_size=10)
         
         rate = rospy.Rate(self.control_rate)
-        # final_transl = self.end_transl.copy()
-        # final_transl[2] = final_transl[2] + 0.05
-        # final_rot = [2.8579501636139772,-0.33845687974150823,-2.993867600126739]
-        # thres = 5e-4
-        # rot_ang = qt2rpy(self.end_rot)
-        # distance = np.asarray([self.end_transl[0]-final_transl[0], self.end_transl[1]-final_transl[1], self.end_transl[2]-final_transl[2], rot_ang[0]-final_rot[0], rot_ang[1]-final_rot[1], rot_ang[2]-final_rot[2]])
-        # if distance[3] > np.pi:
-        #     distance[3] -=2*np.pi
-        # if distance[4] > np.pi:
-        #     distance[4] -=2*np.pi
-        # if distance[5] > np.pi:
-        #     distance[5] -=2*np.pi
-        # if distance[3] < -np.pi:
-        #     distance[3] +=2*np.pi
-        # if distance[4] < -np.pi:
-        #     distance[4] +=2*np.pi
-        # if distance[5] < -np.pi:
-        #     distance[5] +=2*np.pi
-        # while (np.linalg.norm(distance) > thres) and (not rospy.is_shutdown()):
-        #     jacob = getjacobi(self.jsp)
-        #     velocity = np.linalg.inv(jacob).dot(distance.T)
-        #     velocity = velocity*(-0.5)
-        #     print("velocity:",velocity)
-        #     print("distance:",distance)
-        #     print("rot_ang:",rot_ang)
-        #     msg=Float64MultiArray()
-        #     msg.data=velocity.tolist()
-        #     msg.layout.data_offset=1
-        #     pub.publish(msg)
-        #     rot_ang = qt2rpy(self.end_rot)
-        #     distance = np.asarray([self.end_transl[0]-final_transl[0], self.end_transl[1]-final_transl[1], self.end_transl[2]-final_transl[2], rot_ang[0]-final_rot[0], rot_ang[1]-final_rot[1], rot_ang[2]-final_rot[2]])
-        #     if distance[3] > np.pi:
-        #         distance[3] -=2*np.pi
-        #     if distance[4] > np.pi:
-        #         distance[4] -=2*np.pi
-        #     if distance[5] > np.pi:
-        #         distance[5] -=2*np.pi
-        #     if distance[3] < -np.pi:
-        #         distance[3] +=2*np.pi
-        #     if distance[4] < -np.pi:
-        #         distance[4] +=2*np.pi
-        #     if distance[5] < -np.pi:
-        #         distance[5] +=2*np.pi
-        #     rate.sleep()
+
         rospy.loginfo("start admittance control")
         M = np.diag([8, 8, 8])
         D = np.diag([600, 600, 600])
-        K = np.diag([800, 800, 800])
-        f_desired = 0
+        K = np.diag([0, 0, 0])
+        f_desired = np.assarray([0,0,10])
         iter = 0
         acc_last = np.zeros(3)
         v_error = np.zeros(3)
         p_error = np.zeros(3)
         v_error_last = np.zeros(3)
         p_error_last = np.zeros(3)
-        while not rospy.is_shutdown():
+        f_error = - f_desired + self.end_corforce # base coordination
+        while not rospy.is_shutdown() and np.abs(np.linalg.norm(f_error)) > 0.1:
             print("time:",rospy.Time.now().to_sec())
             iter += 1
             f_error = - f_desired + self.end_corforce
@@ -249,8 +207,47 @@ class TrajectoryClient:
             v_error_last = v_error
             p_error_last = p_error
             rate.sleep()
-        msg.data = [0,0,0,0,0,0]
-        pub.publish(msg)
+        rospy.loginfo("Touched object. Begin to adjust angle and force")
+
+        M = np.diag([8, 8, 8])
+        D = np.diag([600, 600, 600])
+        K = np.diag([0, 0, 0])
+        f_desired_e = np.asarray([0,0,10])
+        iter = 0
+        acc_last = np.zeros(3)
+        v_error = np.zeros(3)
+        p_error = np.zeros(3)
+        v_error_last = np.zeros(3)
+        p_error_last = np.zeros(3)
+        omegax = PID_Controller(1, 0, 0, -0.2, 0.2)
+        omegay = PID_Controller(1, 0, 0, -0.2, 0.2)
+        omegaz = PID_Controller(1, 0, 0, -0.2, 0.2)
+        omega = np.zeros(3)
+        f_desired = np.linalg.inv(qt2rot(self.end_rot)).dot(f_desired_e)
+        f_error = - f_desired + self.end_corforce 
+        while not rospy.is_shutdown():
+            print("time:",rospy.Time.now().to_sec())
+            iter += 1
+            f_desired = np.linalg.inv(qt2rot(self.end_rot)).dot(f_desired_e)
+            f_error = - f_desired + self.end_corforce
+            acc = np.linalg.inv(M).dot((f_error - D.dot(v_error_last) - K.dot(p_error_last)))
+            v_error = v_error_last + acc_last/self.control_rate
+            p_error = p_error_last + v_error_last/self.control_rate
+            omega =  qt2rot(self.end_rot).dot(np.asarray([omegax.get_output(self.end_torque[0]/self.end_force[2]), omegay.get_output(self.end_torque[1]/self.end_force[2]), omegaz.get_output(self.end_torque[2]/self.end_force[2]),]))
+            ang_vel = np.linalg.pinv(getjacobi(self.jsp)).dot(np.asarray(v_error.tolist() + omega.tolist()).T).tolist()
+            print("ang_vel:",ang_vel)
+            msg = Float64MultiArray()
+            if np.linalg.norm(ang_vel) > 3:
+                ang_vel = [0,0,0,0,0,0]
+            msg.data = ang_vel
+            msg.layout.data_offset = 1
+            pub.publish(msg)
+            acc_last = acc
+            v_error_last = v_error
+            p_error_last = p_error
+            rate.sleep()
+        rospy.loginfo("Touched object. Begin to adjust angle and force")
+        
 
 
     def get_trajectory(self,start_js,final_pose):
@@ -313,6 +310,41 @@ class TrajectoryClient:
                 return 1
         return 0
   
+class PID_Controller:
+    def __init__(self,kp,ki,kd,output_min,output_max):
+        self.kp = kp
+        self.ki = ki
+        self.kd = kd
+        self.error = 0 #
+        self.last_error = 0 
+        self.error_sum = 0 
+        self.error_diff = 0
+        
+        self.output_min = output_min
+        self.output_max = output_max
+        self.output = 0 
+
+    def constrain(self, output):
+        if output > self.output_max:
+            output = self.output_max
+        elif output < self.output_min:
+            output = self.output_min
+        else:
+            output = output
+        return output
+
+    def get_output(self, error):
+        self.error = error
+        self.error_sum += self.error 
+        self.error_diff = self.error - self.last_error
+        self.last_error = self.error
+
+        output = self.kp * self.error + self.ki * self.error_sum + self.kd * self.error_diff
+        self.output = self.constrain(output)
+
+        return self.output
+
+
 def getjacobi(jsp):
     x1 = jsp[2]
     x2 = jsp[1]
@@ -405,6 +437,7 @@ def getjacobi(jsp):
 
     return jacob
     
+
 if __name__ == "__main__":
     client = TrajectoryClient()
     client.admittance_control()
