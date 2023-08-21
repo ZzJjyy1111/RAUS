@@ -230,102 +230,86 @@ class TrajectoryClient:
         msg_stop.data = [0,0,0,0,0,0]
         msg_stop.layout.data_offset = 1
         self.pub.publish(msg_stop)
-    
-    
+
     def admittance_control(self):
+
         
         rate = rospy.Rate(self.control_rate)
-
+        rospy.sleep(2)
         rospy.loginfo("start admittance control")
-        M = np.diag([8, 8, 8])
-        D = np.diag([600, 600, 600])
-        K = np.diag([0, 0, 0])
-        f_desired = np.asarray([0,0,10])
+
+        MF = np.diag([8, 8, 8])
+        DF = np.diag([600, 600, 600])
+        KF = np.diag([0, 0, 0])
+        MT = np.diag([1, 1 ,1])
+        DT = np.diag([20, 20, 5])
+        KT = np.diag([0, 0, 0])
+        f_desired = 0 #np.asarray([0,0,20])
+        t_desired = 0
         iter = 0
+        acc = np.zeros(3)
         acc_last = np.zeros(3)
         v_error = np.zeros(3)
         p_error = np.zeros(3)
         v_error_last = np.zeros(3)
         p_error_last = np.zeros(3)
-        f_error = - f_desired + self.end_corforce # base coordination
-        while not rospy.is_shutdown() and np.abs(np.linalg.norm(f_error)) > 0.1:
+        alpha = np.zeros(3)
+        alpha_last = np.zeros(3)
+        omega_error = np.zeros(3)
+        theta_error = np.zeros(3)
+        omega_error_last = np.zeros(3)
+        theta_error_last = np.zeros(3)
+        rospy.on_shutdown(self.my_shutdown_handler)
+        while not rospy.is_shutdown():
             print("time:",rospy.Time.now().to_sec())
             iter += 1
             f_error = - f_desired + self.end_corforce
-            acc = np.linalg.inv(M).dot((f_error - D.dot(v_error_last) - K.dot(p_error_last)))
+            t_error = - t_desired + self.end_cortorque
+            acc = np.linalg.inv(MF).dot((f_error - DF.dot(v_error_last) - KF.dot(p_error_last)))
+            alpha = np.linalg.inv(MT).dot((t_error - DT.dot(omega_error_last) - KT.dot(theta_error_last)))
             v_error = v_error_last + acc_last/self.control_rate
             p_error = p_error_last + v_error_last/self.control_rate
             # print("f_error:",f_error)
             # print("v_error:",v_error)
             # print("p_error:",p_error)
-            ang_vel = np.linalg.pinv(getjacobi(self.jsp)).dot(np.asarray(v_error.tolist()+[0,0,0]).T).tolist()
-            # print("ang_vel:",ang_vel)
-            msg = Float64MultiArray()
-            msg.data = ang_vel
-            msg.layout.data_offset = 1
-            self.pub.publish(msg)
-            acc_last = acc
-            v_error_last = v_error
-            p_error_last = p_error
-            rate.sleep()
-        rospy.loginfo("Touched object. Begin to adjust angle and force")
+            omega_error = omega_error_last + alpha_last/self.control_rate
+            theta_error = theta_error_last + omega_error_last/self.control_rate
+            print("torque:",self.end_torque)
+            print("cortorque:",self.end_cortorque)
+            print("alpha:",alpha)
+            print("omega_error:",omega_error)
+            print("theta_error:",theta_error)
 
-        M = np.diag([8, 8, 8])
-        D = np.diag([600, 600, 600])
-        K = np.diag([0, 0, 0])
-        f_desired_e = np.asarray([0,0,10])
-        iter = 0
-        acc_last = np.zeros(3)
-        v_error = np.zeros(3)
-        p_error = np.zeros(3)
-        v_error_last = np.zeros(3)
-        p_error_last = np.zeros(3)
-        omegax = PID_Controller(1, 0, 0, -0.2, 0.2)
-        omegay = PID_Controller(1, 0, 0, -0.2, 0.2)
-        omegaz = PID_Controller(1, 0, 0, -0.2, 0.2)
-        omega = np.zeros(3)
-        f_desired = np.linalg.inv(qt2rot(self.end_rot)).dot(f_desired_e)
-        f_error = - f_desired + self.end_corforce 
-        while not rospy.is_shutdown():
-            print("omegax: ", omegax)
-            print("omegay: ", omegay)
-            iter += 1
-            f_desired = np.linalg.inv(qt2rot(self.end_rot)).dot(f_desired_e)
-            f_error = - f_desired + self.end_corforce
-            acc = np.linalg.inv(M).dot((f_error - D.dot(v_error_last) - K.dot(p_error_last)))
-            v_error = v_error_last + acc_last/self.control_rate
-            p_error = p_error_last + v_error_last/self.control_rate
-            omega =  qt2rot(self.end_rot).dot(np.asarray([omegax.get_output(self.end_torque[0]/self.end_force[2]), omegay.get_output(self.end_torque[1]/self.end_force[2]), omegaz.get_output(self.end_torque[2]/self.end_force[2]),]))
-            ang_vel = np.linalg.pinv(getjacobi(self.jsp)).dot(np.asarray(v_error.tolist() + omega.tolist()).T).tolist()
+            ang_vel = np.linalg.pinv(getjacobi(self.jsp)).dot(np.asarray(v_error.tolist()+omega_error.tolist()).T).tolist()
+            if (np.linalg.norm(ang_vel) > 3) :
+                ang_vel = [0,0,0,0,0,0]
             print("ang_vel:",ang_vel)
             msg = Float64MultiArray()
-            if np.linalg.norm(ang_vel) > 3:
-                ang_vel = [0,0,0,0,0,0]
             msg.data = ang_vel
             msg.layout.data_offset = 1
             self.pub.publish(msg)
             acc_last = acc
             v_error_last = v_error
             p_error_last = p_error
+            alpha_last = alpha
+            omega_error_last = omega_error
+            theta_error_last = theta_error
             rate.sleep()
 
-        
+    
+        msg_stop = Float64MultiArray()
+        msg_stop.data = [0,0,0,0,0,0]
+        msg_stop.layout.data_offset = 1
+        self.pub.publish(msg_stop)
+
+        srvv = SwitchControllerRequest()
+        srvv.stop_controllers = ["joint_group_vel_controller"]
+        srvv.start_controllers = ["scaled_pos_joint_traj_controller"]
+        srvv.strictness = SwitchControllerRequest.BEST_EFFORT
+        self.switch_srv(srvv)
+        print("finish")
 
 
-    def get_trajectory(self,start_js,final_pose):
-        theta0 = [start_js[2],start_js[1],start_js[0],start_js[3],start_js[4],start_js[5]]
-        joint_weights = [10,8,8,2,2,1]
-        ik = InverseKinematicsUR5()
-        ik.setJointWeights(joint_weights)
-        ik.setJointLimits(-np.pi, np.pi)
-        best_config = ik.findClosestIK(final_pose,theta0)
-        t_max = int(np.max(np.abs(best_config-theta0))/0.01)
-        duration_list = []
-        position_list = []
-        for i in range(t_max):
-            duration_list.append(rospy.Duration((i+1))/5.0)
-            position_list.append((best_config-theta0)/t_max*(i+1)+theta0)
-        return [t_max,position_list,duration_list]
 
 
     
@@ -372,41 +356,6 @@ class TrajectoryClient:
                 return 1
         return 0
   
-class PID_Controller:
-    def __init__(self,kp,ki,kd,output_min,output_max):
-        self.kp = kp
-        self.ki = ki
-        self.kd = kd
-        self.error = 0 #
-        self.last_error = 0 
-        self.error_sum = 0 
-        self.error_diff = 0
-        
-        self.output_min = output_min
-        self.output_max = output_max
-        self.output = 0 
-
-    def constrain(self, output):
-        if output > self.output_max:
-            output = self.output_max
-        elif output < self.output_min:
-            output = self.output_min
-        else:
-            output = output
-        return output
-
-    def get_output(self, error):
-        self.error = error
-        self.error_sum += self.error 
-        self.error_diff = self.error - self.last_error
-        self.last_error = self.error
-
-        output = self.kp * self.error + self.ki * self.error_sum + self.kd * self.error_diff
-        self.output = self.constrain(output)
-
-        return self.output
-
-
 def getjacobi(jsp):
     x1 = jsp[2]
     x2 = jsp[1]
@@ -441,7 +390,7 @@ def getjacobi(jsp):
 
     jacob[1,5]= 0
     
-
+    
     jacob[2,0] = 0
 
     jacob[2,1] = 0.14355000000000472058254681834643*sin(x2 + x3 + x4 - x5) + 0.099699999999998567545844707638025*sin(x2 + x3 + x4) - 0.14355000000000473816235162010724*sin(x2 + x3 + x4 + x5) - 0.39220000000000254658516496419907*cos(x2 + x3) - 0.42500000000001136868377216160297*cos(x2)
@@ -499,7 +448,6 @@ def getjacobi(jsp):
 
     return jacob
     
-
 if __name__ == "__main__":
     client = TrajectoryClient()
     client.admittance_control()
