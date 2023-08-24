@@ -1,16 +1,104 @@
 #!/usr/bin/env python
 
 import sys
+import os
 import rospy
+import math
+import numpy as np
 import geometry_msgs.msg as geometry_msgs
+import tf2_msgs.msg as tf2_msgs
 
-def wrench_callback(self,end_wrench):
-    end_force[0] = end_wrench.wrench.force.x
-    end_force[1] = end_wrench.wrench.force.y
-    end_force[2] = end_wrench.wrench.force.z
-    end_torque[0] = end_wrench.wrench.torque.x
-    end_torque[1] = end_wrench.wrench.torque.y
-    end_torque[2] = end_wrench.wrench.torque.z
+def qt2rpy(q):
+    [x,y,z,w] = q
 
-rospy.init_node("eth_sub")
-wrench_topic = rospy.Subscriber("/ethdag", geometry_msgs.WrenchStamped, self.wrench_callback, queue_size=10)
+    alpha = math.atan2(2 * (w * x + y * z), 1 - 2 * (x ** 2 + y ** 2))
+    beta = math.asin(2 * (w * y - z * x))
+    gamma = math.atan2(2 * (w * z + x * y), 1 - 2 * (y ** 2 + z ** 2))
+    
+    return np.asarray([alpha,beta,gamma])
+
+def qt2rot(q):
+    #q:list
+    [x,y,z,w] = q
+    return np.array([[1-2*y*y-2*z*z, 2*x*y-2*z*w, 2*x*z+2*y*w],
+             [2*x*y+2*z*w, 1-2*x*x-2*z*z, 2*y*z-2*x*w],
+             [2*x*z-2*y*w, 2*y*z+2*x*w, 1-2*x*x-2*y*y]])
+
+class eth_sub:
+    def __init__(self):
+        rospy.init_node("eth_sub")
+        self.wrench_topic = rospy.Subscriber("/ethdaq_data", geometry_msgs.WrenchStamped, self.wrench_callback, queue_size=10)
+        self.tf_topic = rospy.Subscriber("/tf", tf2_msgs.TFMessage, self.tf_callback, queue_size=10)
+
+        self.end_transl = np.zeros(3)
+        self.end_rot = np.zeros(4)
+        self.end_force = np.zeros(3)
+        self.end_torque = np.zeros(3)
+
+        self.end_corforce = np.zeros(3)
+        self.end_cortorque = np.zeros(3)
+
+        califile = open('TFSensorCaliData', 'r')
+        self.f_offset = np.asarray(map(float,califile.readline().split()))
+        self.t_offset = np.asarray(map(float,califile.readline().split()))
+        self.grav = float(califile.readline())
+        self.gcp = np.asarray(map(float,califile.readline().split()))
+        califile.close()
+        print(self.f_offset)
+        print(self.t_offset)
+        print(self.grav)
+        print(self.gcp)
+        
+    def tf_callback(self,end_tf):
+        if end_tf.transforms[0].child_frame_id == "tool0_controller":
+            self.end_transl[0] = end_tf.transforms[0].transform.translation.x
+            self.end_transl[1] = end_tf.transforms[0].transform.translation.y
+            self.end_transl[2] = end_tf.transforms[0].transform.translation.z
+            self.end_rot[0] = end_tf.transforms[0].transform.rotation.x
+            self.end_rot[1] = end_tf.transforms[0].transform.rotation.y
+            self.end_rot[2] = end_tf.transforms[0].transform.rotation.z
+            self.end_rot[3] = end_tf.transforms[0].transform.rotation.w
+            
+
+
+    def wrench_callback(self,end_wrench):
+
+        self.end_force[0] = end_wrench.wrench.force.x - self.f_offset[0] - np.linalg.inv(qt2rot(self.end_rot)).dot(np.asarray([0,0,-self.grav]))[0]
+        if np.abs(self.end_force[0]) < 0.01:
+            self.end_force[0] = 0
+        self.end_force[1] = end_wrench.wrench.force.y - self.f_offset[1] - np.linalg.inv(qt2rot(self.end_rot)).dot(np.asarray([0,0,-self.grav]))[1]
+        if np.abs(self.end_force[1]) < 0.01:
+            self.end_force[1] = 0
+        self.end_force[2] = end_wrench.wrench.force.z - self.f_offset[2] - np.linalg.inv(qt2rot(self.end_rot)).dot(np.asarray([0,0,-self.grav]))[2]
+        if np.abs(self.end_force[2]) < 0.16:
+            self.end_force[2] = 0
+        
+        self.end_torque[0] = end_wrench.wrench.torque.x - self.t_offset[0] - np.cross(self.gcp,np.linalg.inv(qt2rot(self.end_rot)).dot(np.asarray([0,0,-self.grav])))[0]
+        if np.abs(self.end_torque[0]) < 0.000025:
+            self.end_torque[0] = 0
+        self.end_torque[1] = end_wrench.wrench.torque.y - self.t_offset[1] - np.cross(self.gcp,np.linalg.inv(qt2rot(self.end_rot)).dot(np.asarray([0,0,-self.grav])))[1]
+        if np.abs(self.end_torque[1]) < 0.000025:
+            self.end_torque[1] = 0
+        self.end_torque[2] = end_wrench.wrench.torque.x - self.t_offset[2] - np.cross(self.gcp,np.linalg.inv(qt2rot(self.end_rot)).dot(np.asarray([0,0,-self.grav])))[2]
+        if np.abs(self.end_torque[2]) < 0.000001:
+            self.end_torque[2] = 0
+
+        self.end_corforce = qt2rot(self.end_rot).dot(self.end_force)
+        self.end_cortorque = qt2rot(self.end_rot).dot(self.end_torque)
+
+            
+
+    def printout(self):
+        while not rospy.is_shutdown():
+            os.system('clear')
+            print("F:",self.end_force)
+            print("T:",self.end_torque)
+            print("corforce:",self.end_corforce)
+            print("cortorque:",self.end_cortorque)
+            print("rpy:", qt2rpy(self.end_rot))
+            print("lx:",self.end_torque[0]/self.end_force[1])
+            print("ly:",self.end_torque[1]/self.end_force[0])
+
+
+es_node = eth_sub()
+es_node.printout()

@@ -29,12 +29,20 @@ import sys
 
 import rospy
 import actionlib
+from std_msgs.msg import Float64MultiArray
+from inverseKinematicsUR5 import InverseKinematicsUR5, transformRobotParameter
 from control_msgs.msg import FollowJointTrajectoryAction, FollowJointTrajectoryGoal
 from trajectory_msgs.msg import JointTrajectoryPoint
 from controller_manager_msgs.srv import SwitchControllerRequest, SwitchController
 from controller_manager_msgs.srv import LoadControllerRequest, LoadController
 from controller_manager_msgs.srv import ListControllers, ListControllersRequest
 import geometry_msgs.msg as geometry_msgs
+import tf2_msgs.msg as tf2_msgs
+import sensor_msgs.msg as sensor_msgs
+import math
+import numpy as np
+from numpy import cos
+from numpy import sin
 from cartesian_control_msgs.msg import (
     FollowCartesianTrajectoryAction,
     FollowCartesianTrajectoryGoal,
@@ -63,6 +71,7 @@ JOINT_TRAJECTORY_CONTROLLERS = [
     "pos_joint_traj_controller",
     "vel_joint_traj_controller",
     "forward_joint_traj_controller",
+    "joint_group_vel_controller"
 ]
 
 # All of those controllers can be used to execute Cartesian trajectories.
@@ -77,156 +86,343 @@ CARTESIAN_TRAJECTORY_CONTROLLERS = [
 # be conflicting with the joint trajectory controllers
 CONFLICTING_CONTROLLERS = ["joint_group_vel_controller", "twist_controller"]
 
+def qt2rpy(q):
+    [x,y,z,w] = q
+
+    alpha = math.atan2(2 * (w * x + y * z), 1 - 2 * (x ** 2 + y ** 2))
+    beta = math.asin(2 * (w * y - z * x))
+    gamma = math.atan2(2 * (w * z + x * y), 1 - 2 * (y ** 2 + z ** 2))
+    
+    return np.asarray([alpha,beta,gamma])
+
+
+def rot2qt(m):
+    #m:array
+    w = ((np.trace(m) + 1) ** 0.5) / 2
+    x = (m[2][1] - m[1][2]) / (4 * w)
+    y = (m[0][2] - m[2][0]) / (4 * w)
+    z = (m[1][0] - m[0][1]) / (4 * w)
+    return x,y,z,w
+
+def qt2rot(q):
+    #q:list
+    [x,y,z,w] = q
+    return np.array([[1-2*y*y-2*z*z, 2*x*y-2*z*w, 2*x*z+2*y*w],
+             [2*x*y+2*z*w, 1-2*x*x-2*z*z, 2*y*z-2*x*w],
+             [2*x*z-2*y*w, 2*y*z+2*x*w, 1-2*x*x-2*y*y]])
 
 class TrajectoryClient:
     """Small trajectory client to test a joint trajectory"""
 
     def __init__(self):
-        rospy.init_node("mytest")
-
-        timeout = rospy.Duration(5)
+        rospy.init_node("admittance_control")
+        self.end_transl = np.zeros(3)
+        self.end_rot = np.zeros(4)
+        self.end_force = np.zeros(3)
+        self.end_corforce = np.zeros(3)
+        self.end_torque = np.zeros(3)
+        self.jsp = np.zeros(6)
+        self.jsv = np.zeros(6)
+        self.jse = np.zeros(6)
+        timeout = rospy.Duration(10)
+        self.control_rate = 250
         self.switch_srv = rospy.ServiceProxy(
             "controller_manager/switch_controller", SwitchController
         )
         self.load_srv = rospy.ServiceProxy("controller_manager/load_controller", LoadController)
         self.list_srv = rospy.ServiceProxy("controller_manager/list_controllers", ListControllers)
+        self.js_topic = rospy.Subscriber("/joint_states", sensor_msgs.JointState, self.js_callback, queue_size=10)
+        self.wrench_topic = rospy.Subscriber("/wrench1", geometry_msgs.WrenchStamped, self.wrench_callback, queue_size=10)
+        self.tf_topic = rospy.Subscriber("/tf", tf2_msgs.TFMessage, self.tf_callback, queue_size=10)
         try:
             self.switch_srv.wait_for_service(timeout.to_sec())
         except rospy.exceptions.ROSException as err:
             rospy.logerr("Could not reach controller switch service. Msg: {}".format(err))
             sys.exit(-1)
-
-        self.joint_trajectory_controller = JOINT_TRAJECTORY_CONTROLLERS[0]
+        self.joint_trajectory_controller = JOINT_TRAJECTORY_CONTROLLERS[5]
         self.cartesian_trajectory_controller = CARTESIAN_TRAJECTORY_CONTROLLERS[0]
 
-    def send_joint_trajectory(self):
-        """Creates a trajectory and sends it using the selected action server"""
+    def wrench_callback(self,end_wrench):
+        self.end_force[0] = end_wrench.wrench.force.x
+        self.end_force[1] = end_wrench.wrench.force.y
+        self.end_force[2] = end_wrench.wrench.force.z
+        self.end_corforce = qt2rot(self.end_rot).dot(self.end_force)
+        self.end_torque[0] = end_wrench.wrench.torque.x
+        self.end_torque[1] = end_wrench.wrench.torque.y
+        self.end_torque[2] = end_wrench.wrench.torque.z
 
-        # make sure the correct controller is loaded and activated
-        self.switch_controller(self.joint_trajectory_controller)
-        trajectory_client = actionlib.SimpleActionClient(
-            "{}/follow_joint_trajectory".format(self.joint_trajectory_controller),
-            FollowJointTrajectoryAction,
-        )
+    def tf_callback(self,end_tf):
+        if end_tf.transforms[0].child_frame_id == "tool0_controller":
+            self.end_transl[0] = end_tf.transforms[0].transform.translation.x
+            self.end_transl[1] = end_tf.transforms[0].transform.translation.y
+            self.end_transl[2] = end_tf.transforms[0].transform.translation.z
+            self.end_rot[0] = end_tf.transforms[0].transform.rotation.x
+            self.end_rot[1] = end_tf.transforms[0].transform.rotation.y
+            self.end_rot[2] = end_tf.transforms[0].transform.rotation.z
+            self.end_rot[3] = end_tf.transforms[0].transform.rotation.w
 
-        # Wait for action server to be ready
-        timeout = rospy.Duration(5)
-        if not trajectory_client.wait_for_server(timeout):
-            rospy.logerr("Could not reach controller action server.")
-            sys.exit(-1)
+    def js_callback(self,joint_states):
+        self.jsp = joint_states.position
+        self.jsv = joint_states.velocity
+        self.jse = joint_states.effort
+    
+    
+    def admittance_control(self):
+        while not self.switch_controller(self.joint_trajectory_controller):
+            rospy.loginfo("starting controller......")
+        rospy.loginfo("starting controller succeed!")
+        pub=rospy.Publisher('/joint_group_vel_controller/command', Float64MultiArray, queue_size=10)
+        
+        rate = rospy.Rate(self.control_rate)
+        # final_transl = self.end_transl.copy()
+        # final_transl[2] = final_transl[2] + 0.05
+        # final_rot = [2.8579501636139772,-0.33845687974150823,-2.993867600126739]
+        # thres = 5e-4
+        # rot_ang = qt2rpy(self.end_rot)
+        # distance = np.asarray([self.end_transl[0]-final_transl[0], self.end_transl[1]-final_transl[1], self.end_transl[2]-final_transl[2], rot_ang[0]-final_rot[0], rot_ang[1]-final_rot[1], rot_ang[2]-final_rot[2]])
+        # if distance[3] > np.pi:
+        #     distance[3] -=2*np.pi
+        # if distance[4] > np.pi:
+        #     distance[4] -=2*np.pi
+        # if distance[5] > np.pi:
+        #     distance[5] -=2*np.pi
+        # if distance[3] < -np.pi:
+        #     distance[3] +=2*np.pi
+        # if distance[4] < -np.pi:
+        #     distance[4] +=2*np.pi
+        # if distance[5] < -np.pi:
+        #     distance[5] +=2*np.pi
+        # while (np.linalg.norm(distance) > thres) and (not rospy.is_shutdown()):
+        #     jacob = getjacobi(self.jsp)
+        #     velocity = np.linalg.inv(jacob).dot(distance.T)
+        #     velocity = velocity*(-0.5)
+        #     print("velocity:",velocity)
+        #     print("distance:",distance)
+        #     print("rot_ang:",rot_ang)
+        #     msg=Float64MultiArray()
+        #     msg.data=velocity.tolist()
+        #     msg.layout.data_offset=1
+        #     pub.publish(msg)
+        #     rot_ang = qt2rpy(self.end_rot)
+        #     distance = np.asarray([self.end_transl[0]-final_transl[0], self.end_transl[1]-final_transl[1], self.end_transl[2]-final_transl[2], rot_ang[0]-final_rot[0], rot_ang[1]-final_rot[1], rot_ang[2]-final_rot[2]])
+        #     if distance[3] > np.pi:
+        #         distance[3] -=2*np.pi
+        #     if distance[4] > np.pi:
+        #         distance[4] -=2*np.pi
+        #     if distance[5] > np.pi:
+        #         distance[5] -=2*np.pi
+        #     if distance[3] < -np.pi:
+        #         distance[3] +=2*np.pi
+        #     if distance[4] < -np.pi:
+        #         distance[4] +=2*np.pi
+        #     if distance[5] < -np.pi:
+        #         distance[5] +=2*np.pi
+        #     rate.sleep()
+        rospy.loginfo("start admittance control")
+        M = np.diag([8, 8, 8])
+        D = np.diag([600, 600, 600])
+        K = np.diag([800, 800, 800])
+        f_desired = 0
+        iter = 0
+        acc_last = np.zeros(3)
+        v_error = np.zeros(3)
+        p_error = np.zeros(3)
+        v_error_last = np.zeros(3)
+        p_error_last = np.zeros(3)
+        while not rospy.is_shutdown():
+            print("time:",rospy.Time.now().to_sec())
+            iter += 1
+            # f_error = - f_desired + self.end_corforce
+            f_error = 0
+            acc = np.linalg.inv(M).dot((f_error - D.dot(v_error_last) - K.dot(p_error_last)))
+            v_error = v_error_last + acc_last/self.control_rate
+            p_error = p_error_last + v_error_last/self.control_rate
+            # if iter == 2000:
+            #     p_error = p_error + np.asarray([0,0,0.2])
+            # elif iter == 4000:
+            #     p_error = p_error - np.asarray([0,0,0.2])
+            # elif iter == 6000:
+            #     p_error = p_error + np.asarray([0,0.2,0])
+            # elif iter == 8000:
+            #     p_error = p_error - np.asarray([0,0.2,0])
+            # elif iter == 10000:
+            #     p_error = p_error + np.asarray([0.2,0,0])
+            # elif iter == 12000:
+            #     p_error = p_error - np.asarray([0.2,0,0])
+            #     iter = 0
+            p_error = p_error - self.end_corforce/1.2
+            # print("f_error:",f_error)
+            print("v_error:",v_error)
+            # print("p_error:",p_error)
+            ang_vel = np.linalg.pinv(getjacobi(self.jsp)).dot(np.asarray(v_error.tolist()+[0,0,0]).T).tolist()
+            print("ang_vel:",ang_vel)
+            msg = Float64MultiArray()
+            msg.data = ang_vel
+            msg.layout.data_offset = 1
+            pub.publish(msg)
+            acc_last = acc
+            v_error_last = v_error
+            p_error_last = p_error
+            rate.sleep()
+        msg.data = [0,0,0,0,0,0]
+        pub.publish(msg)
 
-        # Create and fill trajectory goal
-        goal = FollowJointTrajectoryGoal()
-        goal.trajectory.joint_names = JOINT_NAMES
 
-        # The following list are arbitrary positions
-        # Change to your own needs if desired
-        position_list = [[-2.76553004,-2.19449322,-1.40785277,-1.11004277,1.57079629,1.73054127]]
-        position_list.append([-2.76553004,-2.19449322,-1.40785277,-1.11004277,1.57079629,1.73054127])
-        position_list.append([-2.76553004,-2.19449322,-1.40785277,-1.11004277,1.57079629,1.73054127])
-        duration_list = [5.0,10.0,15,0]
-        for i, position in enumerate(position_list):
-            point = JointTrajectoryPoint()
-            point.positions = position
-            point.time_from_start = rospy.Duration(duration_list[i])
-            goal.trajectory.points.append(point)
+    def get_trajectory(self,start_js,final_pose):
+        theta0 = [start_js[2],start_js[1],start_js[0],start_js[3],start_js[4],start_js[5]]
+        joint_weights = [10,8,8,2,2,1]
+        ik = InverseKinematicsUR5()
+        ik.setJointWeights(joint_weights)
+        ik.setJointLimits(-np.pi, np.pi)
+        best_config = ik.findClosestIK(final_pose,theta0)
+        t_max = int(np.max(np.abs(best_config-theta0))/0.01)
+        duration_list = []
+        position_list = []
+        for i in range(t_max):
+            duration_list.append(rospy.Duration((i+1))/5.0)
+            position_list.append((best_config-theta0)/t_max*(i+1)+theta0)
+        return [t_max,position_list,duration_list]
 
-        rospy.loginfo("Executing trajectory using the {}".format(self.joint_trajectory_controller))
 
-        trajectory_client.send_goal(goal)
-        trajectory_client.wait_for_result()
-
-        result = trajectory_client.get_result()
-        rospy.loginfo("Trajectory execution finished in state {}".format(result.error_code))
-
-    def send_cartesian_trajectory(self):
-        """Creates a Cartesian trajectory and sends it using the selected action server"""
-        self.switch_controller(self.cartesian_trajectory_controller)
-
-        # make sure the correct controller is loaded and activated
-        goal = FollowCartesianTrajectoryGoal()
-        trajectory_client = actionlib.SimpleActionClient(
-            "{}/follow_cartesian_trajectory".format(self.cartesian_trajectory_controller),
-            FollowCartesianTrajectoryAction,
-        )
-
-        # Wait for action server to be ready
-        timeout = rospy.Duration(5)
-        if not trajectory_client.wait_for_server(timeout):
-            rospy.logerr("Could not reach controller action server.")
-            sys.exit(-1)
-
-        # The following list are arbitrary positions
-        # Change to your own needs if desired
-        pose_list = [
-            geometry_msgs.Pose(
-                geometry_msgs.Vector3(0.3, 0.0, 0.3), geometry_msgs.Quaternion(0, 0, 0, 1)
-            ),
-            geometry_msgs.Pose(
-                geometry_msgs.Vector3(0.0, 0.0, 0.3), geometry_msgs.Quaternion(0, 0, 0, 1)
-            ),
-            geometry_msgs.Pose(
-                geometry_msgs.Vector3(0.0, 0.3, 0.3), geometry_msgs.Quaternion(0, 0, 0, 1)
-            ),
-            geometry_msgs.Pose(
-                geometry_msgs.Vector3(0.3, 0.3, 0.3), geometry_msgs.Quaternion(0, 0, 0, 1)
-            ),
-            geometry_msgs.Pose(
-                geometry_msgs.Vector3(0.3, 0.0, 0.3), geometry_msgs.Quaternion(0, 0, 0, 1)
-            ),
-        ]
-        duration_list = [3.0, 6.0, 9.0, 12.0, 15.0]
-        for i, pose in enumerate(pose_list):
-            point = CartesianTrajectoryPoint()
-            point.pose = pose
-            point.time_from_start = rospy.Duration(duration_list[i])
-            goal.trajectory.points.append(point)
-
-        rospy.loginfo(
-            "Executing trajectory using the {}".format(self.cartesian_trajectory_controller)
-        )
-        trajectory_client.send_goal(goal)
-        trajectory_client.wait_for_result()
-
-        result = trajectory_client.get_result()
-
-        rospy.loginfo("Trajectory execution finished in state {}".format(result.error_code))
-
+    
     def switch_controller(self, target_controller):
         """Activates the desired controller and stops all others from the predefined list above"""
+        
+        target_loaded_flag = 0
+        target_start_flag = 0
         other_controllers = (
             JOINT_TRAJECTORY_CONTROLLERS
             + CARTESIAN_TRAJECTORY_CONTROLLERS
             + CONFLICTING_CONTROLLERS
         )
-
         other_controllers.remove(target_controller)
+        srv = ListControllersRequest()
+        response = self.list_srv(srv)
+        for controller in response.controller:
+            if controller.name == target_controller:
+                target_loaded_flag = 1
+                if controller.state == "running":
+                    target_start_flag = 1
+            else:
+                if not controller.state == "running":
+                    other_controllers.remove(controller.name)
+
+        if target_loaded_flag == 0:
+            srv = LoadControllerRequest()
+            srv.name = target_controller
+            self.load_srv(srv)
+
+        srv = SwitchControllerRequest()
+        srv.stop_controllers = other_controllers
+        if target_start_flag == 0:
+            srv.start_controllers = [target_controller]
+        else:
+            srv.start_controllers = []
+        srv.strictness = SwitchControllerRequest.BEST_EFFORT
+        self.switch_srv(srv)
 
         srv = ListControllersRequest()
         response = self.list_srv(srv)
         for controller in response.controller:
             if controller.name == target_controller and controller.state == "running":
-                return
-
-        srv = LoadControllerRequest()
-        srv.name = target_controller
-        self.load_srv(srv)
-
-        srv = SwitchControllerRequest()
-        srv.stop_controllers = other_controllers
-        srv.start_controllers = [target_controller]
-        srv.strictness = SwitchControllerRequest.BEST_EFFORT
-        self.switch_srv(srv)
+                return 1
+        return 0
   
+def getjacobi(jsp):
+    x1 = jsp[2]
+    x2 = jsp[1]
+    x3 = jsp[0]
+    x4 = jsp[3]
+    x5 = jsp[4]
+    x6 = jsp[5]
+    jacob = np.zeros((6,6))
+
+    jacob[0,0] = 0.14355000000000472937244921922684*cos(x1 - x5) - 0.049849999999999280720490206944283*cos(x2 - x1 + x3 + x4) - 0.071775000000002373476127010493824*cos(x1 + x2 + x3 + x4 + x5) + 0.2125000000000056713300138398604*sin(x1 - x2) + 0.19610000000000128530024434773939*sin(x1 + x2 + x3) + 0.071775000000002364686224609613418*cos(x1 + x2 + x3 + x4 - x5) + 0.071775000000002364686224609613418*cos(x2 - x1 + x3 + x4 + x5) - 0.19610000000000126128492061645967*sin(x2 - x1 + x3) + 0.049849999999999286825354500693742*cos(x1 + x2 + x3 + x4) + 0.14355000000000472937244921922684*cos(x1 + x5) + 0.21250000000000569735375832174257*sin(x1 + x2) - 0.071775000000002355896322208733014*cos(x2 - x1 + x3 + x4 - x5) + 0.13329999999999131432559806853533*cos(x1)
+
+    jacob[0,1] = 0.049849999999999280720490206944283*cos(x2 - x1 + x3 + x4) - 0.071775000000002373476127010493824*cos(x1 + x2 + x3 + x4 + x5) - 0.2125000000000056713300138398604*sin(x1 - x2) + 0.19610000000000128530024434773939*sin(x1 + x2 + x3) + 0.071775000000002364686224609613418*cos(x1 + x2 + x3 + x4 - x5) - 0.071775000000002364686224609613418*cos(x2 - x1 + x3 + x4 + x5) + 0.19610000000000126128492061645967*sin(x2 - x1 + x3) + 0.049849999999999286825354500693742*cos(x1 + x2 + x3 + x4) + 0.21250000000000569735375832174257*sin(x1 + x2) + 0.071775000000002355896322208733014*cos(x2 - x1 + x3 + x4 - x5)
+
+    jacob[0,2] = 0.049849999999999280720490206944283*cos(x2 - x1 + x3 + x4) - 0.071775000000002373476127010493824*cos(x1 + x2 + x3 + x4 + x5) + 0.19610000000000128530024434773939*sin(x1 + x2 + x3) + 0.071775000000002364686224609613418*cos(x1 + x2 + x3 + x4 - x5) - 0.071775000000002364686224609613418*cos(x2 - x1 + x3 + x4 + x5) + 0.19610000000000126128492061645967*sin(x2 - x1 + x3) + 0.049849999999999286825354500693742*cos(x1 + x2 + x3 + x4) + 0.071775000000002355896322208733014*cos(x2 - x1 + x3 + x4 - x5)
+
+    jacob[0,3] = 0.049849999999999280720490206944283*cos(x2 - x1 + x3 + x4) - 0.071775000000002373476127010493824*cos(x1 + x2 + x3 + x4 + x5) + 0.071775000000002364686224609613418*cos(x1 + x2 + x3 + x4 - x5) - 0.071775000000002364686224609613418*cos(x2 - x1 + x3 + x4 + x5) + 0.049849999999999286825354500693742*cos(x1 + x2 + x3 + x4) + 0.071775000000002355896322208733014*cos(x2 - x1 + x3 + x4 - x5)
+
+    jacob[0,4] = 0.14355000000000472937244921922684*cos(x1 + x5) - 0.071775000000002373476127010493824*cos(x1 + x2 + x3 + x4 + x5) - 0.071775000000002364686224609613418*cos(x1 + x2 + x3 + x4 - x5) - 0.071775000000002364686224609613418*cos(x2 - x1 + x3 + x4 + x5) - 0.14355000000000472937244921922684*cos(x1 - x5) - 0.071775000000002355896322208733014*cos(x2 - x1 + x3 + x4 - x5)
+
+    jacob[0,5] = 0
 
 
+    jacob[1,0] = 0.049849999999999280720490206944283*sin(x2 - x1 + x3 + x4) - 0.2125000000000056713300138398604*cos(x1 - x2) + 0.14355000000000472937244921922684*sin(x1 - x5) - 0.071775000000002373476127010493824*sin(x1 + x2 + x3 + x4 + x5) - 0.19610000000000128530024434773939*cos(x1 + x2 + x3) + 0.071775000000002364686224609613418*sin(x1 + x2 + x3 + x4 - x5) - 0.071775000000002364686224609613418*sin(x2 - x1 + x3 + x4 + x5) - 0.19610000000000126128492061645967*cos(x2 - x1 + x3) + 0.049849999999999286825354500693742*sin(x1 + x2 + x3 + x4) - 0.21250000000000569735375832174257*cos(x1 + x2) + 0.14355000000000472937244921922684*sin(x1 + x5) + 0.071775000000002355896322208733014*sin(x2 - x1 + x3 + x4 - x5) + 0.13329999999999131432559806853533*sin(x1)
+
+    jacob[1,1] = 0.2125000000000056713300138398604*cos(x1 - x2) - 0.049849999999999280720490206944283*sin(x2 - x1 + x3 + x4) - 0.071775000000002373476127010493824*sin(x1 + x2 + x3 + x4 + x5) - 0.19610000000000128530024434773939*cos(x1 + x2 + x3) + 0.071775000000002364686224609613418*sin(x1 + x2 + x3 + x4 - x5) + 0.071775000000002364686224609613418*sin(x2 - x1 + x3 + x4 + x5) + 0.19610000000000126128492061645967*cos(x2 - x1 + x3) + 0.049849999999999286825354500693742*sin(x1 + x2 + x3 + x4) - 0.21250000000000569735375832174257*cos(x1 + x2) - 0.071775000000002355896322208733014*sin(x2 - x1 + x3 + x4 - x5)
+
+    jacob[1,2] = 0.071775000000002364686224609613418*sin(x1 + x2 + x3 + x4 - x5) - 0.071775000000002373476127010493824*sin(x1 + x2 + x3 + x4 + x5) - 0.19610000000000128530024434773939*cos(x1 + x2 + x3) - 0.049849999999999280720490206944283*sin(x2 - x1 + x3 + x4) + 0.071775000000002364686224609613418*sin(x2 - x1 + x3 + x4 + x5) + 0.19610000000000126128492061645967*cos(x2 - x1 + x3) + 0.049849999999999286825354500693742*sin(x1 + x2 + x3 + x4) - 0.071775000000002355896322208733014*sin(x2 - x1 + x3 + x4 - x5)
+
+    jacob[1,3] = 0.071775000000002364686224609613418*sin(x1 + x2 + x3 + x4 - x5) - 0.071775000000002373476127010493824*sin(x1 + x2 + x3 + x4 + x5) - 0.049849999999999280720490206944283*sin(x2 - x1 + x3 + x4) + 0.071775000000002364686224609613418*sin(x2 - x1 + x3 + x4 + x5) + 0.049849999999999286825354500693742*sin(x1 + x2 + x3 + x4) - 0.071775000000002355896322208733014*sin(x2 - x1 + x3 + x4 - x5)
+
+    jacob[1,4] = 0.071775000000002364686224609613418*sin(x2 - x1 + x3 + x4 + x5) - 0.071775000000002373476127010493824*sin(x1 + x2 + x3 + x4 + x5) - 0.071775000000002364686224609613418*sin(x1 + x2 + x3 + x4 - x5) - 0.14355000000000472937244921922684*sin(x1 - x5) + 0.14355000000000472937244921922684*sin(x1 + x5) + 0.071775000000002355896322208733014*sin(x2 - x1 + x3 + x4 - x5)
+
+    jacob[1,5]= 0
+    
+
+    jacob[2,0] = 0
+
+    jacob[2,1] = 0.14355000000000472058254681834643*sin(x2 + x3 + x4 - x5) + 0.099699999999998567545844707638025*sin(x2 + x3 + x4) - 0.14355000000000473816235162010724*sin(x2 + x3 + x4 + x5) - 0.39220000000000254658516496419907*cos(x2 + x3) - 0.42500000000001136868377216160297*cos(x2)
+
+    jacob[2,2] = 0.099699999999998567545844707638025*sin(x2 + x3 + x4) - 0.39220000000000254658516496419907*cos(x2 + x3) - 0.28710000000000945874489843845367*cos(x2 + x3 + x4)*sin(x5) - 0.00000000000000001757980480176080969859755473832*sin(x2 + x3 + x4)*cos(x5)
+
+    jacob[2,3] = 0.099699999999998567545844707638025*sin(x2 + x3 + x4) - 0.28710000000000945874489843845367*cos(x2 + x3 + x4)*sin(x5) - 0.00000000000000001757980480176080969859755473832*sin(x2 + x3 + x4)*cos(x5)
+
+    jacob[2,4] = - 0.28710000000000945874489843845367*sin(x2 + x3 + x4)*cos(x5) - sin(x5)*(0.00000000000000001757980480176080969859755473832*cos(x2 + x3 + x4) + 0.00000000000000001757980480176080969859755473832)
+
+    jacob[2,5] = 0
+
+
+
+    jacob[3,0] = 0
+
+    jacob[3,1] = sin(x1)
+
+    jacob[3,2] = sin(x1)
+
+    jacob[3,3] = sin(x1)
+
+    jacob[3,4] = 0.000000000000000061232339957367574077026692924754*sin(x1) + cos(x4)*(cos(x3)*(cos(x1)*sin(x2) + 0.000000000000000061232339957367574077026692924754*cos(x2)*sin(x1)) + sin(x3)*(cos(x1)*cos(x2) - 0.000000000000000061232339957367574077026692924754*sin(x1)*sin(x2))) + sin(x4)*(cos(x3)*(cos(x1)*cos(x2) - 0.000000000000000061232339957367574077026692924754*sin(x1)*sin(x2)) - 1.0*sin(x3)*(cos(x1)*sin(x2) + 0.000000000000000061232339957367574077026692924754*cos(x2)*sin(x1)))
+
+    jacob[3,5] = 3.7493994566544195928818807323743e-33*sin(x1) - 0.49999999999999996938383002131621*cos(x2 - x1 + x3 + x4)*sin(x5) + sin(x4)*(0.000000000000000030616169978683788913213074789694*cos(x1 + x2 + x3) + 0.00000000000000003061616997868378516381361813506*cos(x2 - x1 + x3)) + cos(x4)*(0.000000000000000030616169978683788913213074789694*sin(x1 + x2 + x3) + 0.00000000000000003061616997868378516381361813506*sin(x2 - x1 + x3)) - (cos(x5)*(38270212473354731454767022668825.0*sin(x2 - x1 + x3 + x4) + 38270212473354736141516343487117.0*sin(x1 + x2 + x3 + x4) - 1.25e+48*sin(x1)))/1250000000000000000000000000000000000000000000000 - 0.50000000000000003061616997868379*cos(x1 + x2 + x3 + x4)*sin(x5)
+
+
+
+
+    jacob[4,0] = 0
+
+    jacob[4,1] = - 1.0*cos(x1)
+
+    jacob[4,2] = - 1.0*cos(x1)
+
+    jacob[4,3] = - 1.0*cos(x1)
+
+    jacob[4,4] = 0.49999999999999996938383002131621*cos(x2 - x1 + x3 + x4) - 0.50000000000000003061616997868379*cos(x1 + x2 + x3 + x4) - 0.000000000000000061232339957367574077026692924754*cos(x1)
+
+    jacob[4,5] = 0.000000000000000030616169978683788913213074789694*sin(x1 + x2 + x3)*sin(x4) - 0.000000000000000030616169978683788913213074789694*cos(x1 + x2 + x3)*cos(x4) - cos(x5)*(0.00000000000000003061616997868378516381361813506*cos(x2 - x1 + x3 + x4) - 0.000000000000000030616169978683788913213074789694*cos(x1 + x2 + x3 + x4) + cos(x1)) - 3.7493994566544195928818807323743e-33*cos(x1) + 0.00000000000000003061616997868378516381361813506*cos(x2 - x1 + x3)*cos(x4) - 0.00000000000000003061616997868378516381361813506*sin(x2 - x1 + x3)*sin(x4) + sin(x5)*(0.49999999999999996938383002131621*sin(x2 - x1 + x3 + x4) - 0.50000000000000003061616997868379*sin(x1 + x2 + x3 + x4))
+
+
+
+    jacob[5,0] = 1
+
+    jacob[5,1] = 0.000000000000000061232339957367574077026692924754
+
+    jacob[5,2] = 0.000000000000000061232339957367574077026692924754
+
+    jacob[5,3] = 0.000000000000000061232339957367574077026692924754
+
+    jacob[5,4] = 3.7493994566544195928818807323743e-33 - 1.0*cos(x2 + x3 + x4)
+
+    jacob[5,5] = cos(x5)*(0.000000000000000061232339957367574077026692924754*cos(x2 + x3 + x4) + 0.000000000000000061232339957367574077026692924754) - 1.0*sin(x2 + x3 + x4)*sin(x5) - 0.000000000000000061232339957367574077026692924754*cos(x2 + x3 + x4) + 2.2958450216584849647377114753717e-49
+
+    return jacob
     
 if __name__ == "__main__":
     client = TrajectoryClient()
+    client.admittance_control()
 
-    # The controller choice is obviously not required to move the robot. It is a part of this demo
-    # script in order to show all available trajectory controllers.
 
-    # client.send_joint_trajectory()
-    client.send_cartesian_trajectory()
 

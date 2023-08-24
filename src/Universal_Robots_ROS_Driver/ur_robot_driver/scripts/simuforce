@@ -11,7 +11,7 @@ A = 40
 while not rospy.is_shutdown(): 
     simu_force = geometry_msgs.WrenchStamped()
     # simu_force.wrench.force.z = A*np.sin(i*np.pi/2000)
-    simu_force.wrench.force.z = A
+    simu_force.wrench.force.z = 0.001
     simu_force.wrench.force.y = 0
     simu_force.wrench.force.x = 0
     simu_force.wrench.torque.x = 0

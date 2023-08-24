@@ -86,6 +86,7 @@ CARTESIAN_TRAJECTORY_CONTROLLERS = [
 # be conflicting with the joint trajectory controllers
 CONFLICTING_CONTROLLERS = ["joint_group_vel_controller", "twist_controller"]
 
+
 def limitAng(ang):
     for i in range(len(ang)):
         while ang[i] > np.pi:
@@ -93,6 +94,30 @@ def limitAng(ang):
         while ang[i] < -np.pi:
             ang[i] = ang[i] + 2*np.pi
     return ang
+
+def qt2rpy(q):
+    [x,y,z,w] = q
+
+    alpha = math.atan2(2 * (w * x + y * z), 1 - 2 * (x ** 2 + y ** 2))
+    beta = math.asin(2 * (w * y - z * x))
+    gamma = math.atan2(2 * (w * z + x * y), 1 - 2 * (y ** 2 + z ** 2))
+    
+    return np.asarray([alpha,beta,gamma])
+
+def rot2qt(m):
+    #m:array
+    w = ((np.trace(m) + 1) ** 0.5) / 2
+    x = (m[2][1] - m[1][2]) / (4 * w)
+    y = (m[0][2] - m[2][0]) / (4 * w)
+    z = (m[1][0] - m[0][1]) / (4 * w)
+    return x,y,z,w
+
+def qt2rot(q):
+    #q:list
+    [x,y,z,w] = q
+    return np.array([[1-2*y*y-2*z*z, 2*x*y-2*z*w, 2*x*z+2*y*w],
+             [2*x*y+2*z*w, 1-2*x*x-2*z*z, 2*y*z-2*x*w],
+             [2*x*z-2*y*w, 2*y*z+2*x*w, 1-2*x*x-2*y*y]])
 
 def rot2rpy(m):
         pitch = np.arctan2(-m[2, 0], np.sqrt(m[0, 0]**2 + m[1, 0]**2))
@@ -111,39 +136,6 @@ def rot2rpy(m):
                               m[2, 2] * sec_pitch)
         return np.asarray([roll, pitch, yaw])
 
-def qt2rpy(q):
-    [x,y,z,w] = q
-
-    alpha = math.atan2(2 * (w * x + y * z), 1 - 2 * (x ** 2 + y ** 2))
-    beta = math.asin(2 * (w * y - z * x))
-    gamma = math.atan2(2 * (w * z + x * y), 1 - 2 * (y ** 2 + z ** 2))
-    
-    return np.asarray([alpha,beta,gamma])
-
-def qt2rpy(q):
-    [x,y,z,w] = q
-
-    alpha = math.atan2(2 * (w * x + y * z), 1 - 2 * (x ** 2 + y ** 2))
-    beta = math.asin(2 * (w * y - z * x))
-    gamma = math.atan2(2 * (w * z + x * y), 1 - 2 * (y ** 2 + z ** 2))
-    
-    return np.asarray([alpha,beta,gamma])
-
-
-def rot2qt(m):
-    #m:array
-    w = ((np.trace(m) + 1) ** 0.5) / 2
-    x = (m[2][1] - m[1][2]) / (4 * w)
-    y = (m[0][2] - m[2][0]) / (4 * w)
-    z = (m[1][0] - m[0][1]) / (4 * w)
-    return x,y,z,w
-
-def qt2rot(q):
-    #q:list
-    [x,y,z,w] = q
-    return np.array([[1-2*y*y-2*z*z, 2*x*y-2*z*w, 2*x*z+2*y*w],
-             [2*x*y+2*z*w, 1-2*x*x-2*z*z, 2*y*z-2*x*w],
-             [2*x*z-2*y*w, 2*y*z+2*x*w, 1-2*x*x-2*y*y]])
 
 class TrajectoryClient:
     """Small trajectory client to test a joint trajectory"""
@@ -159,12 +151,19 @@ class TrajectoryClient:
         self.jsp = np.zeros(6)
         self.jsv = np.zeros(6)
         self.jse = np.zeros(6)
-        califile = open('TFSensorCaliData', 'r')
-        self.f_offset = np.asarray(map(float,califile.readline().split()))
-        self.t_offset = np.asarray(map(float,califile.readline().split()))
-        self.grav = float(califile.readline())
-        self.gcp = np.asarray(map(float,califile.readline().split()))
-        califile.close()
+
+        # califile = open('TFSensorCaliData', 'r')
+        # self.f_offset = np.asarray(map(float,califile.readline().split()))
+        # self.t_offset = np.asarray(map(float,califile.readline().split()))
+        # self.grav = float(califile.readline())
+        # self.gcp = np.asarray(map(float,califile.readline().split()))
+        # califile.close()
+        
+        self.f_offset = np.zeros(3)
+        self.t_offset = np.zeros(3)
+        self.grav = 0
+        self.gcp = np.zeros(3)
+
         timeout = rospy.Duration(10)
         self.control_rate = 250
         self.switch_srv = rospy.ServiceProxy(
@@ -275,9 +274,12 @@ class TrajectoryClient:
         #     rate.sleep()
         # rospy.loginfo("Touched object. Begin to adjust angle and force")
 
-        M = np.diag([8, 8, 8])
-        D = np.diag([600, 600, 600])
-        K = np.diag([0, 0, 0])
+        MF = np.diag([8, 8, 8])
+        DF = np.diag([600, 600, 600])
+        KF = np.diag([0, 0, 0])
+        MT = np.diag([1, 1 ,1])
+        DT = np.diag([10, 10, 10])
+        KT = np.diag([10, 10, 10])
         f_desired_e = np.asarray([0,0,0])
         iter = 0
         acc_last = np.zeros(3)
@@ -285,28 +287,34 @@ class TrajectoryClient:
         p_error = np.zeros(3)
         v_error_last = np.zeros(3)
         p_error_last = np.zeros(3)
-        omegax = PID_Controller(2, 0, 0.1, -0.3, 0.3)
-        omegay = PID_Controller(2, 0, 0.1, -0.3, 0.3)
-        omegaz = PID_Controller(2, 0, 0.1, -0.3, 0.3)
-        omega = np.zeros(3)
+
+        alpha_last = np.zeros(3)
+        omega_error = np.zeros(3)
+        theta_error = np.zeros(3)
+        omega_error_last = np.zeros(3)
+        theta_error_last = np.zeros(3)
+        
+        t_error = np.zeros(3)
         while not rospy.is_shutdown():
-            # print("omegax: ", omegax)
-            # print("omegay: ", omegay)
             iter += 1
             f_desired = qt2rot(self.end_rot).dot(f_desired_e)
             f_error = - f_desired + self.end_corforce
-            acc = np.linalg.inv(M).dot((f_error - D.dot(v_error_last) - K.dot(p_error_last)))
+            acc = np.linalg.inv(MF).dot((f_error - DF.dot(v_error_last) - KF.dot(p_error_last)))
+            alpha = np.linalg.inv(MT).dot((t_error - DT.dot(omega_error_last) - KT.dot(theta_error_last)))
             v_error = v_error_last + acc_last/self.control_rate
             p_error = p_error_last + v_error_last/self.control_rate
-            # delta_theta_e = limitAng(rot2rpy(np.linalg.inv(qt2rot(self.end_rot)).dot(qt2rot([0.5010297,-0.83323,0.23347,0.0137]))))
-            # delta_theta_e = limitAng(rot2rpy(np.linalg.inv(qt2rot(self.end_rot)).dot(qt2rot([0.7071068,-0.7071068,0,0]))))
-            thex = np.sgn(self.end_torque[0])*math.atan2(np.abs(self.end_force[1]),np.abs(self.end_force[2]))
-            they = np.sgn(self.end_torque[1])*math.atan2(np.abs(self.end_force[0]),np.abs(self.end_force[2]))
-            thez = 0
-            # print(thex,they,thez)
-            omega =  qt2rot(self.end_rot).dot(np.asarray([omegax.get_output(thex), omegay.get_output(they), omegaz.get_output(thez),]))
-            print(omega)
-            ang_vel = np.linalg.pinv(getjacobi(self.jsp)).dot(np.asarray(v_error.tolist() + omega.tolist()).T).tolist()
+            omega_error = omega_error_last + alpha_last/self.control_rate
+            theta_error = theta_error_last + omega_error_last/self.control_rate
+            delta_theta_e = limitAng(rot2rpy(np.linalg.inv(qt2rot(self.end_rot)).dot(qt2rot([0.7071068,-0.7071068,0,0]))))
+            print(delta_theta_e)
+            # delta_theta_e[2] = 0
+            delta_theta = qt2rot(self.end_rot).dot(delta_theta_e)
+            if np.linalg.norm(theta_error) < 0.01 and np.linalg.norm(delta_theta) > 0.001 and np.linalg.norm(delta_theta) < 3:
+                print("111")
+                theta_error = theta_error - 0.8*delta_theta
+            ang_vel = np.linalg.pinv(getjacobi(self.jsp)).dot(np.asarray(v_error.tolist() + omega_error.tolist()).T).tolist()
+            # print("omega_error:", omega_error)
+            # print("theta_error_last:", theta_error_last)
             # print("ang_vel:",ang_vel)
             msg = Float64MultiArray()
             if np.linalg.norm(ang_vel) > 3:
@@ -317,6 +325,9 @@ class TrajectoryClient:
             acc_last = acc
             v_error_last = v_error
             p_error_last = p_error
+            alpha_last = alpha
+            omega_error_last = omega_error
+            theta_error_last = theta_error
             rate.sleep()
 
         
