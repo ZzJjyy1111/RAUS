@@ -291,12 +291,11 @@ class TrajectoryClient:
         p_error = np.zeros(3)
         v_error_last = np.zeros(3)
         p_error_last = np.zeros(3)
-        omegax = PID_Controller(0.4, 0, 0, -0.08, 0.08)
-        omegay = PID_Controller(0.4, 0, 0, -0.08, 0.08)
-        omegaz = PID_Controller(0.4, 0, 0, -0.08, 0.08)
+        omega_tx = PID_Controller(2.0, 0, 0, -0.08, 0.08)
+        omega_ty = PID_Controller(0.1, 0 , 0, -0.08, 0.08)
+        omega_tz = PID_Controller(0.0 ,0 , 0, -0.08, 0.08)
         omega = np.zeros(3)
-        thex_last = 0
-        they_last = 0
+        omega_last = np.asarray[0,0,0]
         while not rospy.is_shutdown():
             # print("omegax: ", omegax)
             # print("omegay: ", omegay)
@@ -311,21 +310,34 @@ class TrajectoryClient:
             # delta_theta_e = limitAng(rot2rpy(np.linalg.inv(qt2rot(self.end_rot)).dot(qt2rot([0.7071068,-0.7071068,0,0]))))
 
 
-            if np.linalg.norm(self.end_force) > 2:
-                thex = -np.sign(self.end_torque[0])*math.atan2(np.abs(self.end_force[1]),np.abs(self.end_force[2]))/2.0 + thex_last/2.0
-                they = -np.sign(self.end_torque[1])*math.atan2(np.abs(self.end_force[0]),np.abs(self.end_force[2]))/2.0 + they_last/2.0
-                thez = 0
-                omega =  qt2rot(self.end_rot).dot(np.asarray([omegax.get_output(thex), omegay.get_output(they), omegaz.get_output(thez)]))
+            if np.linalg.norm(self.end_force) > 3:
+                # thex = -np.sign(self.end_torque[0])*math.atan2(np.abs(self.end_force[1]),np.abs(self.end_force[2]))
+                # they = -np.sign(self.end_torque[1])*math.atan2(np.abs(self.end_force[0]),np.abs(self.end_force[2]))
+                # thez = 0
+
+                omega = qt2rot(self.end_rot).dot(np.asarray([omega_tx.get_output(self.end_torque[0]/self.end_force[2]), omega_ty.get_output(0.0/self.end_force[2]), omega_tz.get_output(0.0/self.end_force[2])]))
+                # else:
+                #     print("torqur control")
+                #     omega_tx.clear()
+                #     omega_ty.clear()
+                #     omega_tz.clear()
+                #     omega = qt2rot(self.end_rot).dot(np.asarray([-omega_fx.get_output(thex), -omega_fy.get_output(they), -omega_fz.get_output(thez)]))
+                omega = (omega + omega_last)/2.0
                 print("force:",self.end_corforce)
-                print("theta:",thex,they,thez)
+                print("torque:",self.end_torque)
+                # print("theta:",thex,they,thez)
                 print("omega:",omega)
                 ang_vel = np.linalg.pinv(getjacobi(self.jsp)).dot(np.asarray(v_error.tolist() + omega.tolist()).T).tolist()
-                thex_last = thex
-                they_last = they
+                omega_last = omega
             else:
-                thex_last = 0
-                they_last = 0
-                ang_vel = np.linalg.pinv(getjacobi(self.jsp)).dot(np.asarray(v_error.tolist() +[0,0,0]).T).tolist()
+                # omega_fx.clear()
+                # omega_fy.clear()
+                # omega_fz.clear()
+                omega_tx.clear()
+                omega_ty.clear()
+                omega_tz.clear()
+                omega_last = np.asarray([0,0,0])
+                ang_vel = np.linalg.pinv(getjacobi(self.jsp)).dot(np.asarray(v_error.tolist() + [0,0,0]).T).tolist()
             # print("ang_vel:",ang_vel)
             msg = Float64MultiArray()
             if np.linalg.norm(ang_vel) > 3:
