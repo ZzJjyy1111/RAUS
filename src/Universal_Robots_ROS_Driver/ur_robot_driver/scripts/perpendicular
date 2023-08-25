@@ -165,6 +165,10 @@ class TrajectoryClient:
         self.grav = float(califile.readline())
         self.gcp = np.asarray(map(float,califile.readline().split()))
         califile.close()
+
+        self.file = open("myloginfo.txt",'w')
+        sys.stdout = self.file
+
         timeout = rospy.Duration(10)
         self.control_rate = 250
         self.switch_srv = rospy.ServiceProxy(
@@ -192,23 +196,23 @@ class TrajectoryClient:
     def wrench_callback(self,end_wrench):
 
         self.end_force[0] = end_wrench.wrench.force.x - self.f_offset[0] - np.linalg.inv(qt2rot(self.end_rot)).dot(np.asarray([0,0,-self.grav]))[0]
-        if self.end_force[0] < 0.01:
+        if np.abs(self.end_force[0]) < 0.1:
             self.end_force[0] = 0
         self.end_force[1] = end_wrench.wrench.force.y - self.f_offset[1] - np.linalg.inv(qt2rot(self.end_rot)).dot(np.asarray([0,0,-self.grav]))[1]
-        if self.end_force[1] < 0.01:
+        if np.abs(self.end_force[1]) < 0.1:
             self.end_force[1] = 0
         self.end_force[2] = end_wrench.wrench.force.z - self.f_offset[2] - np.linalg.inv(qt2rot(self.end_rot)).dot(np.asarray([0,0,-self.grav]))[2]
-        if self.end_force[2] < 0.16:
+        if np.abs(self.end_force[2]) < 0.1:
             self.end_force[2] = 0
         
         self.end_torque[0] = end_wrench.wrench.torque.x - self.t_offset[0] - np.cross(self.gcp,np.linalg.inv(qt2rot(self.end_rot)).dot(np.asarray([0,0,-self.grav])))[0]
-        if self.end_torque[0] < 0.000025:
+        if np.abs(self.end_torque[0]) < 0.000025:
             self.end_torque[0] = 0
         self.end_torque[1] = end_wrench.wrench.torque.y - self.t_offset[1] - np.cross(self.gcp,np.linalg.inv(qt2rot(self.end_rot)).dot(np.asarray([0,0,-self.grav])))[1]
-        if self.end_torque[1] < 0.000025:
+        if np.abs(self.end_torque[1]) < 0.000025:
             self.end_torque[1] = 0
         self.end_torque[2] = end_wrench.wrench.torque.x - self.t_offset[2] - np.cross(self.gcp,np.linalg.inv(qt2rot(self.end_rot)).dot(np.asarray([0,0,-self.grav])))[2]
-        if self.end_torque[2] < 0.000001:
+        if np.abs(self.end_torque[2]) < 0.000001:
             self.end_torque[2] = 0
 
         self.end_corforce = qt2rot(self.end_rot).dot(self.end_force)
@@ -231,6 +235,7 @@ class TrajectoryClient:
 
 
     def my_shutdown_handler(self):
+        self.file.close()
         msg_stop = Float64MultiArray()
         msg_stop.data = [0,0,0,0,0,0]
         msg_stop.layout.data_offset = 1
@@ -253,8 +258,9 @@ class TrajectoryClient:
         # v_error_last = np.zeros(3)
         # p_error_last = np.zeros(3)
         # f_error = - f_desired + self.end_corforce # base coordination
-        # while not rospy.is_shutdown() and np.abs(np.linalg.norm(f_error)) > 0.1:
+        # while not rospy.is_shutdown() :
         #     print("time:",rospy.Time.now().to_sec())
+        #     print(self.end_corforce)
         #     iter += 1
         #     f_error = - f_desired + self.end_corforce
         #     acc = np.linalg.inv(M).dot((f_error - D.dot(v_error_last) - K.dot(p_error_last)))
@@ -278,35 +284,48 @@ class TrajectoryClient:
         M = np.diag([8, 8, 8])
         D = np.diag([600, 600, 600])
         K = np.diag([0, 0, 0])
-        f_desired_e = np.asarray([0,0,0])
+        f_desired_e = np.asarray([0,0,-10])
         iter = 0
         acc_last = np.zeros(3)
         v_error = np.zeros(3)
         p_error = np.zeros(3)
         v_error_last = np.zeros(3)
         p_error_last = np.zeros(3)
-        omegax = PID_Controller(2, 0, 0.1, -0.3, 0.3)
-        omegay = PID_Controller(2, 0, 0.1, -0.3, 0.3)
-        omegaz = PID_Controller(2, 0, 0.1, -0.3, 0.3)
+        omegax = PID_Controller(0.4, 0, 0, -0.08, 0.08)
+        omegay = PID_Controller(0.4, 0, 0, -0.08, 0.08)
+        omegaz = PID_Controller(0.4, 0, 0, -0.08, 0.08)
         omega = np.zeros(3)
+        thex_last = 0
+        they_last = 0
         while not rospy.is_shutdown():
             # print("omegax: ", omegax)
             # print("omegay: ", omegay)
             iter += 1
             f_desired = qt2rot(self.end_rot).dot(f_desired_e)
+            # f_desired = np.asarray([0,0,10])
             f_error = - f_desired + self.end_corforce
             acc = np.linalg.inv(M).dot((f_error - D.dot(v_error_last) - K.dot(p_error_last)))
             v_error = v_error_last + acc_last/self.control_rate
             p_error = p_error_last + v_error_last/self.control_rate
             # delta_theta_e = limitAng(rot2rpy(np.linalg.inv(qt2rot(self.end_rot)).dot(qt2rot([0.5010297,-0.83323,0.23347,0.0137]))))
             # delta_theta_e = limitAng(rot2rpy(np.linalg.inv(qt2rot(self.end_rot)).dot(qt2rot([0.7071068,-0.7071068,0,0]))))
-            thex = np.sgn(self.end_torque[0])*math.atan2(np.abs(self.end_force[1]),np.abs(self.end_force[2]))
-            they = np.sgn(self.end_torque[1])*math.atan2(np.abs(self.end_force[0]),np.abs(self.end_force[2]))
-            thez = 0
-            # print(thex,they,thez)
-            omega =  qt2rot(self.end_rot).dot(np.asarray([omegax.get_output(thex), omegay.get_output(they), omegaz.get_output(thez),]))
-            print(omega)
-            ang_vel = np.linalg.pinv(getjacobi(self.jsp)).dot(np.asarray(v_error.tolist() + omega.tolist()).T).tolist()
+
+
+            if np.linalg.norm(self.end_force) > 2:
+                thex = -np.sign(self.end_torque[0])*math.atan2(np.abs(self.end_force[1]),np.abs(self.end_force[2]))/2.0 + thex_last/2.0
+                they = -np.sign(self.end_torque[1])*math.atan2(np.abs(self.end_force[0]),np.abs(self.end_force[2]))/2.0 + they_last/2.0
+                thez = 0
+                omega =  qt2rot(self.end_rot).dot(np.asarray([omegax.get_output(thex), omegay.get_output(they), omegaz.get_output(thez)]))
+                print("force:",self.end_corforce)
+                print("theta:",thex,they,thez)
+                print("omega:",omega)
+                ang_vel = np.linalg.pinv(getjacobi(self.jsp)).dot(np.asarray(v_error.tolist() + omega.tolist()).T).tolist()
+                thex_last = thex
+                they_last = they
+            else:
+                thex_last = 0
+                they_last = 0
+                ang_vel = np.linalg.pinv(getjacobi(self.jsp)).dot(np.asarray(v_error.tolist() +[0,0,0]).T).tolist()
             # print("ang_vel:",ang_vel)
             msg = Float64MultiArray()
             if np.linalg.norm(ang_vel) > 3:
