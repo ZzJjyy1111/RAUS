@@ -295,7 +295,7 @@ class TrajectoryClient:
         omega_ty = PID_Controller(0.1, 0 , 0, -0.08, 0.08)
         omega_tz = PID_Controller(0.0 ,0 , 0, -0.08, 0.08)
         omega = np.zeros(3)
-        omega_last = np.asarray[0,0,0]
+        omega_last = np.asarray([0,0,0])
         while not rospy.is_shutdown():
             # print("omegax: ", omegax)
             # print("omegay: ", omegay)

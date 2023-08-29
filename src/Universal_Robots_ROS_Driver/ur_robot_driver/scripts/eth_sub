@@ -29,12 +29,17 @@ class eth_sub:
         rospy.init_node("eth_sub")
         self.wrench_topic = rospy.Subscriber("/ethdaq_data", geometry_msgs.WrenchStamped, self.wrench_callback, queue_size=10)
         self.tf_topic = rospy.Subscriber("/tf", tf2_msgs.TFMessage, self.tf_callback, queue_size=10)
-
+        self.wrench_pub = rospy.Publisher("mywrench", geometry_msgs.WrenchStamped, queue_size=1)
         self.end_transl = np.zeros(3)
         self.end_rot = np.zeros(4)
         self.end_force = np.zeros(3)
         self.end_torque = np.zeros(3)
-
+        self.end_fx_list = [0,0,0]
+        self.end_fy_list = [0,0,0]
+        self.end_fz_list = [0,0,0]
+        self.end_tx_list = [0,0,0]
+        self.end_ty_list = [0,0,0]
+        self.end_tz_list = [0,0,0]
         self.end_corforce = np.zeros(3)
         self.end_cortorque = np.zeros(3)
 
@@ -63,25 +68,48 @@ class eth_sub:
 
     def wrench_callback(self,end_wrench):
 
-        self.end_force[0] = end_wrench.wrench.force.x - self.f_offset[0] - np.linalg.inv(qt2rot(self.end_rot)).dot(np.asarray([0,0,-self.grav]))[0]
-        if np.abs(self.end_force[0]) < 0.01:
-            self.end_force[0] = 0
-        self.end_force[1] = end_wrench.wrench.force.y - self.f_offset[1] - np.linalg.inv(qt2rot(self.end_rot)).dot(np.asarray([0,0,-self.grav]))[1]
-        if np.abs(self.end_force[1]) < 0.01:
-            self.end_force[1] = 0
-        self.end_force[2] = end_wrench.wrench.force.z - self.f_offset[2] - np.linalg.inv(qt2rot(self.end_rot)).dot(np.asarray([0,0,-self.grav]))[2]
-        if np.abs(self.end_force[2]) < 0.16:
-            self.end_force[2] = 0
+        this_ef= end_wrench.wrench.force.x - self.f_offset[0] - np.linalg.inv(qt2rot(self.end_rot)).dot(np.asarray([0,0,-self.grav]))[0]
+        if np.abs(this_ef) < 0.1:
+            this_ef = 0
+        self.end_fx_list.pop(0)
+        self.end_fx_list.append(this_ef)
+        self.end_force[0] = sum(self.end_fx_list)/3.0
+
+        this_ef = end_wrench.wrench.force.y - self.f_offset[1] - np.linalg.inv(qt2rot(self.end_rot)).dot(np.asarray([0,0,-self.grav]))[1]
+        if np.abs(this_ef) < 0.1:
+            this_ef = 0
+        self.end_fy_list.pop(0)
+        self.end_fy_list.append(this_ef)
+        self.end_force[1] = sum(self.end_fy_list)/3.0
+
+        this_ef = end_wrench.wrench.force.z - self.f_offset[2] - np.linalg.inv(qt2rot(self.end_rot)).dot(np.asarray([0,0,-self.grav]))[2]
+        if np.abs(this_ef) < 0.1:
+            this_ef = 0
+        self.end_fz_list.pop(0)
+        self.end_fz_list.append(this_ef)
+        self.end_force[2] = sum(self.end_fz_list)/3.0
+
         
-        self.end_torque[0] = end_wrench.wrench.torque.x - self.t_offset[0] - np.cross(self.gcp,np.linalg.inv(qt2rot(self.end_rot)).dot(np.asarray([0,0,-self.grav])))[0]
-        if np.abs(self.end_torque[0]) < 0.000025:
-            self.end_torque[0] = 0
-        self.end_torque[1] = end_wrench.wrench.torque.y - self.t_offset[1] - np.cross(self.gcp,np.linalg.inv(qt2rot(self.end_rot)).dot(np.asarray([0,0,-self.grav])))[1]
-        if np.abs(self.end_torque[1]) < 0.000025:
-            self.end_torque[1] = 0
-        self.end_torque[2] = end_wrench.wrench.torque.x - self.t_offset[2] - np.cross(self.gcp,np.linalg.inv(qt2rot(self.end_rot)).dot(np.asarray([0,0,-self.grav])))[2]
-        if np.abs(self.end_torque[2]) < 0.000001:
-            self.end_torque[2] = 0
+        this_et = end_wrench.wrench.torque.x - self.t_offset[0] - np.cross(self.gcp,np.linalg.inv(qt2rot(self.end_rot)).dot(np.asarray([0,0,-self.grav])))[0]
+        if np.abs(this_et) < 0.000025:
+            this_et = 0
+        self.end_tx_list.pop(0)
+        self.end_tx_list.append(this_et)
+        self.end_torque[0] = sum(self.end_tx_list)/3.0
+        
+        this_et = end_wrench.wrench.torque.y - self.t_offset[1] - np.cross(self.gcp,np.linalg.inv(qt2rot(self.end_rot)).dot(np.asarray([0,0,-self.grav])))[1]
+        if np.abs(this_et) < 0.000025:
+            this_et = 0
+        self.end_ty_list.pop(0)
+        self.end_ty_list.append(this_et)
+        self.end_torque[1] = sum(self.end_ty_list)/3.0
+
+        this_et = end_wrench.wrench.torque.x - self.t_offset[2] - np.cross(self.gcp,np.linalg.inv(qt2rot(self.end_rot)).dot(np.asarray([0,0,-self.grav])))[2]
+        if np.abs(this_et) < 0.000001:
+            this_et = 0
+        self.end_tz_list.pop(0)
+        self.end_tz_list.append(this_et)
+        self.end_torque[2] = sum(self.end_tz_list)/3.0
 
         self.end_corforce = qt2rot(self.end_rot).dot(self.end_force)
         self.end_cortorque = qt2rot(self.end_rot).dot(self.end_torque)
@@ -89,15 +117,27 @@ class eth_sub:
             
 
     def printout(self):
+        rate = rospy.Rate(100)
         while not rospy.is_shutdown():
-            os.system('clear')
-            print("F:",self.end_force)
-            print("T:",self.end_torque)
-            print("corforce:",self.end_corforce)
-            print("cortorque:",self.end_cortorque)
-            print("rpy:", qt2rpy(self.end_rot))
-            print("lx:",self.end_torque[0]/self.end_force[1])
-            print("ly:",self.end_torque[1]/self.end_force[0])
+            # os.system('clear')
+            # print("F:",self.end_force)
+            # print("T:",self.end_torque)
+            # print("corforce:",self.end_corforce)
+            # print("cortorque:",self.end_cortorque)
+            # print("rpy:", qt2rpy(self.end_rot))
+            # print("lx:",self.end_torque[0]/self.end_force[1])
+            # print("ly:",self.end_torque[1]/self.end_force[0])
+            pub_wrench = geometry_msgs.WrenchStamped()
+            pub_wrench.header.stamp = rospy.Time.now()
+            pub_wrench.wrench.force.x = self.end_force[0]
+            pub_wrench.wrench.force.y = self.end_force[1]
+            pub_wrench.wrench.force.z = self.end_force[2]
+            pub_wrench.wrench.torque.x = self.end_torque[0]
+            pub_wrench.wrench.torque.y = self.end_torque[1]
+            pub_wrench.wrench.torque.z = self.end_torque[2]
+            self.wrench_pub.publish(pub_wrench)
+            rate.sleep()
+            
 
 
 es_node = eth_sub()
