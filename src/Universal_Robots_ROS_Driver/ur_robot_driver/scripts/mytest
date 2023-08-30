@@ -86,6 +86,40 @@ CARTESIAN_TRAJECTORY_CONTROLLERS = [
 # be conflicting with the joint trajectory controllers
 CONFLICTING_CONTROLLERS = ["joint_group_vel_controller", "twist_controller"]
 
+def limitAng(ang):
+    for i in range(len(ang)):
+        while ang[i] > np.pi:
+            ang[i] = ang[i] - 2*np.pi
+        while ang[i] < -np.pi:
+            ang[i] = ang[i] + 2*np.pi
+    return ang
+
+def rot2rpy(m):
+        pitch = np.arctan2(-m[2, 0], np.sqrt(m[0, 0]**2 + m[1, 0]**2))
+
+        if np.isclose(pitch, np.pi / 2.):
+            yaw = 0.
+            roll = np.arctan2(m[0, 1], m[1, 1])
+        elif np.isclose(pitch, -np.pi / 2.):
+            yaw = 0.
+            roll = -np.arctan2(m[0, 1], m[1, 1])
+        else:
+            sec_pitch = 1. / np.cos(pitch)
+            yaw = np.arctan2(m[1, 0] * sec_pitch,
+                             m[0, 0] * sec_pitch)
+            roll = np.arctan2(m[2, 1] * sec_pitch,
+                              m[2, 2] * sec_pitch)
+        return np.asarray([roll, pitch, yaw])
+
+def qt2rpy(q):
+    [x,y,z,w] = q
+
+    alpha = math.atan2(2 * (w * x + y * z), 1 - 2 * (x ** 2 + y ** 2))
+    beta = math.asin(2 * (w * y - z * x))
+    gamma = math.atan2(2 * (w * z + x * y), 1 - 2 * (y ** 2 + z ** 2))
+    
+    return np.asarray([alpha,beta,gamma])
+
 def qt2rpy(q):
     [x,y,z,w] = q
 
@@ -121,9 +155,20 @@ class TrajectoryClient:
         self.end_force = np.zeros(3)
         self.end_corforce = np.zeros(3)
         self.end_torque = np.zeros(3)
+        self.end_cortorque = np.zeros(3)
         self.jsp = np.zeros(6)
         self.jsv = np.zeros(6)
         self.jse = np.zeros(6)
+        califile = open('TFSensorCaliData', 'r')
+        self.f_offset = np.asarray(map(float,califile.readline().split()))
+        self.t_offset = np.asarray(map(float,califile.readline().split()))
+        self.grav = float(califile.readline())
+        self.gcp = np.asarray(map(float,califile.readline().split()))
+        califile.close()
+
+        self.file = open("myloginfo.txt",'w')
+        sys.stdout = self.file
+
         timeout = rospy.Duration(10)
         self.control_rate = 250
         self.switch_srv = rospy.ServiceProxy(
@@ -132,7 +177,8 @@ class TrajectoryClient:
         self.load_srv = rospy.ServiceProxy("controller_manager/load_controller", LoadController)
         self.list_srv = rospy.ServiceProxy("controller_manager/list_controllers", ListControllers)
         self.js_topic = rospy.Subscriber("/joint_states", sensor_msgs.JointState, self.js_callback, queue_size=10)
-        self.wrench_topic = rospy.Subscriber("/wrench1", geometry_msgs.WrenchStamped, self.wrench_callback, queue_size=10)
+        # self.no_load_force
+        self.wrench_topic = rospy.Subscriber("/ethdaq_data", geometry_msgs.WrenchStamped, self.wrench_callback, queue_size=10)
         self.tf_topic = rospy.Subscriber("/tf", tf2_msgs.TFMessage, self.tf_callback, queue_size=10)
         try:
             self.switch_srv.wait_for_service(timeout.to_sec())
@@ -140,16 +186,37 @@ class TrajectoryClient:
             rospy.logerr("Could not reach controller switch service. Msg: {}".format(err))
             sys.exit(-1)
         self.joint_trajectory_controller = JOINT_TRAJECTORY_CONTROLLERS[5]
-        self.cartesian_trajectory_controller = CARTESIAN_TRAJECTORY_CONTROLLERS[0]
+
+        while not self.switch_controller(self.joint_trajectory_controller):
+            rospy.loginfo("starting controller......")
+        rospy.loginfo("starting controller succeed!")
+        self.pub=rospy.Publisher('/joint_group_vel_controller/command', Float64MultiArray, queue_size=1)
+        # self.cartesian_trajectory_controller = CARTESIAN_TRAJECTORY_CONTROLLERS[0]
 
     def wrench_callback(self,end_wrench):
-        self.end_force[0] = end_wrench.wrench.force.x
-        self.end_force[1] = end_wrench.wrench.force.y
-        self.end_force[2] = end_wrench.wrench.force.z
+
+        self.end_force[0] = end_wrench.wrench.force.x - self.f_offset[0] - np.linalg.inv(qt2rot(self.end_rot)).dot(np.asarray([0,0,-self.grav]))[0]
+        if np.abs(self.end_force[0]) < 0.1:
+            self.end_force[0] = 0
+        self.end_force[1] = end_wrench.wrench.force.y - self.f_offset[1] - np.linalg.inv(qt2rot(self.end_rot)).dot(np.asarray([0,0,-self.grav]))[1]
+        if np.abs(self.end_force[1]) < 0.1:
+            self.end_force[1] = 0
+        self.end_force[2] = end_wrench.wrench.force.z - self.f_offset[2] - np.linalg.inv(qt2rot(self.end_rot)).dot(np.asarray([0,0,-self.grav]))[2]
+        if np.abs(self.end_force[2]) < 0.1:
+            self.end_force[2] = 0
+        
+        self.end_torque[0] = end_wrench.wrench.torque.x - self.t_offset[0] - np.cross(self.gcp,np.linalg.inv(qt2rot(self.end_rot)).dot(np.asarray([0,0,-self.grav])))[0]
+        if np.abs(self.end_torque[0]) < 0.000025:
+            self.end_torque[0] = 0
+        self.end_torque[1] = end_wrench.wrench.torque.y - self.t_offset[1] - np.cross(self.gcp,np.linalg.inv(qt2rot(self.end_rot)).dot(np.asarray([0,0,-self.grav])))[1]
+        if np.abs(self.end_torque[1]) < 0.000025:
+            self.end_torque[1] = 0
+        self.end_torque[2] = end_wrench.wrench.torque.x - self.t_offset[2] - np.cross(self.gcp,np.linalg.inv(qt2rot(self.end_rot)).dot(np.asarray([0,0,-self.grav])))[2]
+        if np.abs(self.end_torque[2]) < 0.000001:
+            self.end_torque[2] = 0
+
         self.end_corforce = qt2rot(self.end_rot).dot(self.end_force)
-        self.end_torque[0] = end_wrench.wrench.torque.x
-        self.end_torque[1] = end_wrench.wrench.torque.y
-        self.end_torque[2] = end_wrench.wrench.torque.z
+        self.end_cortorque = qt2rot(self.end_rot).dot(self.end_torque)
 
     def tf_callback(self,end_tf):
         if end_tf.transforms[0].child_frame_id == "tool0_controller":
@@ -165,107 +232,108 @@ class TrajectoryClient:
         self.jsp = joint_states.position
         self.jsv = joint_states.velocity
         self.jse = joint_states.effort
+
+
+    def my_shutdown_handler(self):
+        self.file.close()
+        msg_stop = Float64MultiArray()
+        msg_stop.data = [0,0,0,0,0,0]
+        msg_stop.layout.data_offset = 1
+        self.pub.publish(msg_stop)
     
     
     def admittance_control(self):
-        while not self.switch_controller(self.joint_trajectory_controller):
-            rospy.loginfo("starting controller......")
-        rospy.loginfo("starting controller succeed!")
-        pub=rospy.Publisher('/joint_group_vel_controller/command', Float64MultiArray, queue_size=10)
         
         rate = rospy.Rate(self.control_rate)
-        # final_transl = self.end_transl.copy()
-        # final_transl[2] = final_transl[2] + 0.05
-        # final_rot = [2.8579501636139772,-0.33845687974150823,-2.993867600126739]
-        # thres = 5e-4
-        # rot_ang = qt2rpy(self.end_rot)
-        # distance = np.asarray([self.end_transl[0]-final_transl[0], self.end_transl[1]-final_transl[1], self.end_transl[2]-final_transl[2], rot_ang[0]-final_rot[0], rot_ang[1]-final_rot[1], rot_ang[2]-final_rot[2]])
-        # if distance[3] > np.pi:
-        #     distance[3] -=2*np.pi
-        # if distance[4] > np.pi:
-        #     distance[4] -=2*np.pi
-        # if distance[5] > np.pi:
-        #     distance[5] -=2*np.pi
-        # if distance[3] < -np.pi:
-        #     distance[3] +=2*np.pi
-        # if distance[4] < -np.pi:
-        #     distance[4] +=2*np.pi
-        # if distance[5] < -np.pi:
-        #     distance[5] +=2*np.pi
-        # while (np.linalg.norm(distance) > thres) and (not rospy.is_shutdown()):
-        #     jacob = getjacobi(self.jsp)
-        #     velocity = np.linalg.inv(jacob).dot(distance.T)
-        #     velocity = velocity*(-0.5)
-        #     print("velocity:",velocity)
-        #     print("distance:",distance)
-        #     print("rot_ang:",rot_ang)
-        #     msg=Float64MultiArray()
-        #     msg.data=velocity.tolist()
-        #     msg.layout.data_offset=1
-        #     pub.publish(msg)
-        #     rot_ang = qt2rpy(self.end_rot)
-        #     distance = np.asarray([self.end_transl[0]-final_transl[0], self.end_transl[1]-final_transl[1], self.end_transl[2]-final_transl[2], rot_ang[0]-final_rot[0], rot_ang[1]-final_rot[1], rot_ang[2]-final_rot[2]])
-        #     if distance[3] > np.pi:
-        #         distance[3] -=2*np.pi
-        #     if distance[4] > np.pi:
-        #         distance[4] -=2*np.pi
-        #     if distance[5] > np.pi:
-        #         distance[5] -=2*np.pi
-        #     if distance[3] < -np.pi:
-        #         distance[3] +=2*np.pi
-        #     if distance[4] < -np.pi:
-        #         distance[4] +=2*np.pi
-        #     if distance[5] < -np.pi:
-        #         distance[5] +=2*np.pi
-        #     rate.sleep()
+
         rospy.loginfo("start admittance control")
+        # M = np.diag([8, 8, 8])
+        # D = np.diag([600, 600, 600])
+        # K = np.diag([0, 0, 0])
+        # f_desired = np.asarray([0,0,10])
+        # iter = 0
+        # acc_last = np.zeros(3)
+        # v_error = np.zeros(3)
+        # p_error = np.zeros(3)
+        # v_error_last = np.zeros(3)
+        # p_error_last = np.zeros(3)
+        # f_error = - f_desired + self.end_corforce # base coordination
+        # while not rospy.is_shutdown() :
+        #     print("time:",rospy.Time.now().to_sec())
+        #     print(self.end_corforce)
+        #     iter += 1
+        #     f_error = - f_desired + self.end_corforce
+        #     acc = np.linalg.inv(M).dot((f_error - D.dot(v_error_last) - K.dot(p_error_last)))
+        #     v_error = v_error_last + acc_last/self.control_rate
+        #     p_error = p_error_last + v_error_last/self.control_rate
+        #     # print("f_error:",f_error)
+        #     # print("v_error:",v_error)
+        #     # print("p_error:",p_error)
+        #     ang_vel = np.linalg.pinv(getjacobi(self.jsp)).dot(np.asarray(v_error.tolist()+[0,0,0]).T).tolist()
+        #     # print("ang_vel:",ang_vel)
+        #     msg = Float64MultiArray()
+        #     msg.data = ang_vel
+        #     msg.layout.data_offset = 1
+        #     self.pub.publish(msg)
+        #     acc_last = acc
+        #     v_error_last = v_error
+        #     p_error_last = p_error
+        #     rate.sleep()
+        # rospy.loginfo("Touched object. Begin to adjust angle and force")
+
         M = np.diag([8, 8, 8])
         D = np.diag([600, 600, 600])
-        K = np.diag([800, 800, 800])
-        f_desired = 0
+        K = np.diag([0, 0, 0])
+        f_desired_e = np.asarray([0, 0, 0])
         iter = 0
         acc_last = np.zeros(3)
         v_error = np.zeros(3)
         p_error = np.zeros(3)
         v_error_last = np.zeros(3)
         p_error_last = np.zeros(3)
+        omegax = PID_Controller(0.4, 0, 0, -0.08, 0.08)
+        omegay = PID_Controller(0.4, 0, 0, -0.08, 0.08)
+        omegaz = PID_Controller(0.4, 0, 0, -0.08, 0.08)
+        omega = np.zeros(3)
+        thex_last = 0
+        they_last = 0
         while not rospy.is_shutdown():
-            print("time:",rospy.Time.now().to_sec())
+            # print("omegax: ", omegax)
+            # print("omegay: ", omegay)
             iter += 1
-            # f_error = - f_desired + self.end_corforce
-            f_error = 0
-            acc = np.linalg.inv(M).dot((f_error - D.dot(v_error_last) - K.dot(p_error_last)))
-            v_error = v_error_last + acc_last/self.control_rate
-            p_error = p_error_last + v_error_last/self.control_rate
-            # if iter == 2000:
-            #     p_error = p_error + np.asarray([0,0,0.2])
-            # elif iter == 4000:
-            #     p_error = p_error - np.asarray([0,0,0.2])
-            # elif iter == 6000:
-            #     p_error = p_error + np.asarray([0,0.2,0])
-            # elif iter == 8000:
-            #     p_error = p_error - np.asarray([0,0.2,0])
-            # elif iter == 10000:
-            #     p_error = p_error + np.asarray([0.2,0,0])
-            # elif iter == 12000:
-            #     p_error = p_error - np.asarray([0.2,0,0])
-            #     iter = 0
-            p_error = p_error - self.end_corforce/1.2
-            # print("f_error:",f_error)
-            print("v_error:",v_error)
-            # print("p_error:",p_error)
-            ang_vel = np.linalg.pinv(getjacobi(self.jsp)).dot(np.asarray(v_error.tolist()+[0,0,0]).T).tolist()
-            print("ang_vel:",ang_vel)
+            f_desired = qt2rot(self.end_rot).dot(f_desired_e)
+            # f_desired = np.asarray([0,0,10])
+
+            delta_theta_e = limitAng(rot2rpy(np.linalg.inv(qt2rot(self.end_rot)).dot(qt2rot([-0.7010573846499781, 0.7010573846499781, -0.09229595564125723, 0.09229595564125723]))))
+            # delta_theta_e = limitAng(rot2rpy(np.linalg.inv(qt2rot(self.end_rot)).dot(qt2rot([0.7071068,-0.7071068,0,0]))))
+
+
+            # if np.linalg.norm(self.end_force) > 2:
+                # thex = -np.sign(self.end_torque[0])*math.atan2(np.abs(self.end_force[1]),np.abs(self.end_force[2]))/2.0 + thex_last/2.0
+                # they = -np.sign(self.end_torque[1])*math.atan2(np.abs(self.end_force[0]),np.abs(self.end_force[2]))/2.0 + they_last/2.0
+                # thez = 0
+            omega = qt2rot(self.end_rot).dot(delta_theta_e)
+            # omega = qt2rot(self.end_rot).dot(np.asarray([omegax.get_output(delta_theta_e[0]), omegay.get_output(delta_theta_e[1]), omegaz.get_output(delta_theta_e[2])]))
+                # print("force:",self.end_corforce)
+                # print("theta:",thex,they,thez)
+                # print("omega:",omega)
+            ang_vel = np.linalg.pinv(getjacobi(self.jsp)).dot(np.asarray([0,0,0]+ omega.tolist()).T).tolist()
+                # thex_last = thex
+                # they_last = they
+            # else:
+            #     thex_last = 0
+            #     they_last = 0
+            #     ang_vel = np.linalg.pinv(getjacobi(self.jsp)).dot(np.asarray(v_error.tolist() +[0,0,0]).T).tolist()
+            # print("ang_vel:",ang_vel)
             msg = Float64MultiArray()
+            if np.linalg.norm(ang_vel) > 3:
+                ang_vel = [0,0,0,0,0,0]
             msg.data = ang_vel
             msg.layout.data_offset = 1
-            pub.publish(msg)
-            acc_last = acc
-            v_error_last = v_error
-            p_error_last = p_error
+            self.pub.publish(msg)
             rate.sleep()
-        msg.data = [0,0,0,0,0,0]
-        pub.publish(msg)
+
+        
 
 
     def get_trajectory(self,start_js,final_pose):
@@ -328,6 +396,47 @@ class TrajectoryClient:
                 return 1
         return 0
   
+class PID_Controller:
+    def __init__(self,kp,ki,kd,output_min,output_max):
+        self.kp = kp
+        self.ki = ki
+        self.kd = kd
+        self.error = 0 #
+        self.last_error = 0 
+        self.error_sum = 0 
+        self.error_diff = 0
+        
+        self.output_min = output_min
+        self.output_max = output_max
+        self.output = 0 
+
+    def constrain(self, output):
+        if output > self.output_max:
+            output = self.output_max
+        elif output < self.output_min:
+            output = self.output_min
+        else:
+            output = output
+        return output
+
+    def clear(self):
+        self.error = 0
+        self.last_error = 0
+        self.error_sum = 0
+        self.error_diff = 0
+
+    def get_output(self, error):
+        self.error = error
+        self.error_sum += self.error 
+        self.error_diff = self.error - self.last_error
+        self.last_error = self.error
+
+        output = self.kp * self.error + self.ki * self.error_sum + self.kd * self.error_diff
+        self.output = self.constrain(output)
+
+        return self.output
+
+
 def getjacobi(jsp):
     x1 = jsp[2]
     x2 = jsp[1]
@@ -420,9 +529,7 @@ def getjacobi(jsp):
 
     return jacob
     
+
 if __name__ == "__main__":
     client = TrajectoryClient()
     client.admittance_control()
-
-
-

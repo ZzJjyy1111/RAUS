@@ -239,6 +239,18 @@ class TrajectoryClient:
     def admittance_control(self):
         
         rate = rospy.Rate(self.control_rate)
+        delta_theta_e = limitAng(rot2rpy(np.linalg.inv(qt2rot(self.end_rot)).dot(qt2rot([-0.7010573846499781, 0.7010573846499781, -0.09229595564125723, 0.09229595564125723]))))
+        while not rospy.is_shutdown() and np.linalg.norm(delta_theta_e) < 0.001:
+            omega = qt2rot(self.end_rot).dot(delta_theta_e)
+            ang_vel = np.linalg.pinv(getjacobi(self.jsp)).dot(np.asarray([0,0,0]+ omega.tolist()).T).tolist()
+            msg = Float64MultiArray()
+            if np.linalg.norm(ang_vel) > 3:
+                ang_vel = [0,0,0,0,0,0]
+            msg.data = ang_vel
+            msg.layout.data_offset = 1
+            self.pub.publish(msg)
+            delta_theta_e = limitAng(rot2rpy(np.linalg.inv(qt2rot(self.end_rot)).dot(qt2rot([-0.7010573846499781, 0.7010573846499781, -0.09229595564125723, 0.09229595564125723]))))
+            rate.sleep()
 
         rospy.loginfo("start admittance control")
 
