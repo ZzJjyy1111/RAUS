@@ -137,11 +137,12 @@ class TrajectoryClient:
         self.jsp = np.zeros(6)
         self.jsv = np.zeros(6)
         self.jse = np.zeros(6)
-        self.force_noload = np.zeros(3)
-        self.torque_noload = np.zeros(3)
-        self.count = 0
-        self.force_sum = np.zeros(3)
-        self.torque_sum = np.zeros(3)
+        califile = open('TFSensorCaliData', 'r')
+        self.f_offset = np.asarray(map(float,califile.readline().split()))
+        self.t_offset = np.asarray(map(float,califile.readline().split()))
+        self.grav = float(califile.readline())
+        self.gcp = np.asarray(map(float,califile.readline().split()))
+        califile.close()
         timeout = rospy.Duration(10)
         self.control_rate = 250
         self.switch_srv = rospy.ServiceProxy(
@@ -168,57 +169,28 @@ class TrajectoryClient:
 
     def wrench_callback(self,end_wrench):
 
-        self.count += 1
-
-        if self.count <= 1000 :
-            self.force_sum[0] += end_wrench.wrench.force.x
-            self.force_sum[1] += end_wrench.wrench.force.y
-            self.force_sum[2] += end_wrench.wrench.force.z
-            self.torque_sum[0] += end_wrench.wrench.torque.x
-            self.torque_sum[1] += end_wrench.wrench.torque.y
-            self.torque_sum[2] += end_wrench.wrench.torque.z
-            if self.count == 1000:
-                self.force_noload = self.force_sum / 1000.0
-                self.torque_noload = self.torque_sum / 1000.0
-        else:
-            if (pow(end_wrench.wrench.force.x - self.force_noload[0],2) < 0.01):
-                self.end_force[0] = 0
-            else:
-                self.end_force[0] = end_wrench.wrench.force.x - self.force_noload[0]
-            if (pow(end_wrench.wrench.force.y - self.force_noload[1],2) < 0.01):
-                self.end_force[1] = 0
-            else:
-                self.end_force[1] = end_wrench.wrench.force.y - self.force_noload[1] 
-            if (pow(end_wrench.wrench.force.z - self.force_noload[2],2) < 0.16):
-                self.end_force[2] = 0
-            else:
-                self.end_force[2] = end_wrench.wrench.force.z - self.force_noload[2]
-
-            if (pow(end_wrench.wrench.torque.x - self.torque_noload[0],2) <  0.000025):
-                self.end_torque[0] = 0
-            else:
-                self.end_torque[0] = end_wrench.wrench.torque.x - self.torque_noload[0]
-            if (pow(end_wrench.wrench.torque.y - self.torque_noload[1],2) <  0.000025):
-                self.end_torque[1] = 0
-            else:
-                self.end_torque[1] = end_wrench.wrench.torque.y - self.torque_noload[1] 
-            if (pow(end_wrench.wrench.torque.z - self.torque_noload[2],2) < 0.000001):
-                self.end_torque[2] = 0
-            else:
-                self.end_torque[2] = end_wrench.wrench.torque.z - self.torque_noload[2]            
-
-
-        # self.end_force[0] = end_wrench.wrench.force.x
-        # self.end_force[1] = end_wrench.wrench.force.y
-        # self.end_force[2] = end_wrench.wrench.force.z
-
-        # self.end_torque[0] = end_wrench.wrench.torque.x
-        # self.end_torque[1] = end_wrench.wrench.torque.y
-        # self.end_torque[2] = end_wrench.wrench.torque.z
+        self.end_force[0] = end_wrench.wrench.force.x - self.f_offset[0] - np.linalg.inv(qt2rot(self.end_rot)).dot(np.asarray([0,0,-self.grav]))[0]
+        if np.abs(self.end_force[0]) < 0.1:
+            self.end_force[0] = 0
+        self.end_force[1] = end_wrench.wrench.force.y - self.f_offset[1] - np.linalg.inv(qt2rot(self.end_rot)).dot(np.asarray([0,0,-self.grav]))[1]
+        if np.abs(self.end_force[1]) < 0.1:
+            self.end_force[1] = 0
+        self.end_force[2] = end_wrench.wrench.force.z - self.f_offset[2] - np.linalg.inv(qt2rot(self.end_rot)).dot(np.asarray([0,0,-self.grav]))[2]
+        if np.abs(self.end_force[2]) < 0.1:
+            self.end_force[2] = 0
+        
+        self.end_torque[0] = end_wrench.wrench.torque.x - self.t_offset[0] - np.cross(self.gcp,np.linalg.inv(qt2rot(self.end_rot)).dot(np.asarray([0,0,-self.grav])))[0]
+        if np.abs(self.end_torque[0]) < 0.000025:
+            self.end_torque[0] = 0
+        self.end_torque[1] = end_wrench.wrench.torque.y - self.t_offset[1] - np.cross(self.gcp,np.linalg.inv(qt2rot(self.end_rot)).dot(np.asarray([0,0,-self.grav])))[1]
+        if np.abs(self.end_torque[1]) < 0.000025:
+            self.end_torque[1] = 0
+        self.end_torque[2] = end_wrench.wrench.torque.x - self.t_offset[2] - np.cross(self.gcp,np.linalg.inv(qt2rot(self.end_rot)).dot(np.asarray([0,0,-self.grav])))[2]
+        if np.abs(self.end_torque[2]) < 0.000001:
+            self.end_torque[2] = 0
 
         self.end_corforce = qt2rot(self.end_rot).dot(self.end_force)
         self.end_cortorque = qt2rot(self.end_rot).dot(self.end_torque)
-        # print(self.end_corforce)
         
 
     def tf_callback(self,end_tf):

@@ -104,7 +104,7 @@ class eth_sub:
         self.end_ty_list.append(this_et)
         self.end_torque[1] = sum(self.end_ty_list)/3.0
 
-        this_et = end_wrench.wrench.torque.x - self.t_offset[2] - np.cross(self.gcp,np.linalg.inv(qt2rot(self.end_rot)).dot(np.asarray([0,0,-self.grav])))[2]
+        this_et = end_wrench.wrench.torque.z - self.t_offset[2] - np.cross(self.gcp,np.linalg.inv(qt2rot(self.end_rot)).dot(np.asarray([0,0,-self.grav])))[2]
         if np.abs(this_et) < 0.000001:
             this_et = 0
         self.end_tz_list.pop(0)

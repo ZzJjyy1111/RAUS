@@ -183,7 +183,7 @@ class TrajectoryClient:
         while not self.switch_controller(self.joint_trajectory_controller):
             rospy.loginfo("starting controller......")
         rospy.loginfo("starting controller succeed!")
-        self.pub=rospy.Publisher('/joint_group_vel_controller/command', Float64MultiArray, queue_size=1)
+        self.pub=rospy.Publisher('/twist_controller/command', geometry_msgs.Twist, queue_size=1)
         # self.cartesian_trajectory_controller = CARTESIAN_TRAJECTORY_CONTROLLERS[0]
 
     def wrench_callback(self,end_wrench):
@@ -204,7 +204,7 @@ class TrajectoryClient:
         self.end_torque[1] = end_wrench.wrench.torque.y - self.t_offset[1] - np.cross(self.gcp,np.linalg.inv(qt2rot(self.end_rot)).dot(np.asarray([0,0,-self.grav])))[1]
         if np.abs(self.end_torque[1]) < 0.000025:
             self.end_torque[1] = 0
-        self.end_torque[2] = end_wrench.wrench.torque.x - self.t_offset[2] - np.cross(self.gcp,np.linalg.inv(qt2rot(self.end_rot)).dot(np.asarray([0,0,-self.grav])))[2]
+        self.end_torque[2] = end_wrench.wrench.torque.z - self.t_offset[2] - np.cross(self.gcp,np.linalg.inv(qt2rot(self.end_rot)).dot(np.asarray([0,0,-self.grav])))[2]
         if np.abs(self.end_torque[2]) < 0.000001:
             self.end_torque[2] = 0
 
@@ -264,12 +264,14 @@ class TrajectoryClient:
         v_scan = 0
         while not rospy.is_shutdown():
             iter += 1
-            rospy.loginfo("shape:{}".format(v_error_e.shape))
+            
+            # rospy.loginfo("iteration:{}".format(iter))
             f_error_e = - f_desired_e + self.end_force
             acc_e = np.linalg.inv(M).dot((f_error_e - D.dot(v_error_e_last) - K.dot(p_error_e_last)))
             v_error_e = v_error_e_last + acc_e_last/self.control_rate
             p_error_e = p_error_e_last + v_error_e_last/self.control_rate
             v_error = qt2rot(self.end_rot).dot(np.asarray([0, 0, v_error_e[2]]))
+
             if np.abs(f_error_e[2]) < 5:
                 dthx.pop(0)
                 # dthx.append(-self.end_torque[0]/np.abs(self.end_force[2]))
@@ -293,9 +295,7 @@ class TrajectoryClient:
                 #     v_error = qt2rot(self.end_rot).dot(np.asarray([0, v_scan, v_error_e[2]]))
                 # v_error = qt2rot(self.end_rot).dot(np.asarray([0, 0.003, v_error_e[2]]))
                 rospy.loginfo("begin")
-                ang_vel = np.linalg.pinv(getjacobi(self.jsp)).dot(np.asarray(v_error.tolist() + omega.tolist()).T).tolist()
-                rospy.loginfo("end")
-                # omega_last = omega
+
             else:
                 # rospy.loginfo("force z")
                 # omega_tx.clear()
@@ -306,13 +306,10 @@ class TrajectoryClient:
                 dthy.pop(0)
                 dthy.append(0)
                 omega = qt2rot(self.end_rot).dot(np.asarray([omega_tx.get_output(sum(dthx)/10.0), omega_ty.get_output(0.0/f_desired_e[2]), omega_tz.get_output(0.0/f_desired_e[2])]))
-                ang_vel = np.linalg.pinv(getjacobi(self.jsp)).dot(np.asarray(v_error.tolist() + omega.tolist()).T).tolist()
-            # print("ang_vel:",ang_vel)
-            msg = Float64MultiArray()
-            if np.linalg.norm(ang_vel) > 3:
-                ang_vel = [0,0,0,0,0,0]
-            msg.data = ang_vel
-            msg.layout.data_offset = 1
+
+            msg = geometry_msgs.Twist()
+            msg.linear = v_error.tolist()
+            msg.angular = omega.tolist()
             self.pub.publish(msg)
             acc_e_last = acc_e
             v_error_e_last = v_error_e

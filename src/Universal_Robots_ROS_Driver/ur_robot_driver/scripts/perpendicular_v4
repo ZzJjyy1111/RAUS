@@ -248,60 +248,26 @@ class TrajectoryClient:
         rate = rospy.Rate(self.control_rate)
 
         rospy.loginfo("start admittance control")
-        # M = np.diag([8, 8, 8])
-        # D = np.diag([600, 600, 600])
-        # K = np.diag([0, 0, 0])
-        # f_desired = np.asarray([0,0,10])
-        # iter = 0
-        # acc_last = np.zeros(3)
-        # v_error = np.zeros(3)
-        # p_error = np.zeros(3)
-        # v_error_last = np.zeros(3)
-        # p_error_last = np.zeros(3)
-        # f_error = - f_desired + self.end_corforce # base coordination
-        # while not rospy.is_shutdown() :
-        #     print("time:",rospy.Time.now().to_sec())
-        #     print(self.end_corforce)
-        #     iter += 1
-        #     f_error = - f_desired + self.end_corforce
-        #     acc = np.linalg.inv(M).dot((f_error - D.dot(v_error_last) - K.dot(p_error_last)))
-        #     v_error = v_error_last + acc_last/self.control_rate
-        #     p_error = p_error_last + v_error_last/self.control_rate
-        #     # print("f_error:",f_error)
-        #     # print("v_error:",v_error)
-        #     # print("p_error:",p_error)
-        #     ang_vel = np.linalg.pinv(getjacobi(self.jsp)).dot(np.asarray(v_error.tolist()+[0,0,0]).T).tolist()
-        #     # print("ang_vel:",ang_vel)
-        #     msg = Float64MultiArray()
-        #     msg.data = ang_vel
-        #     msg.layout.data_offset = 1
-        #     self.pub.publish(msg)
-        #     acc_last = acc
-        #     v_error_last = v_error
-        #     p_error_last = p_error
-        #     rate.sleep()
-        # rospy.loginfo("Touched object. Begin to adjust angle and force")
 
         M = np.diag([10, 10, 10])
         D = np.diag([1500, 1500, 1500])
         K = np.diag([0, 0, 0])
-        f_desired_e = np.asarray([0,0,-15])
+        f_desired_e = np.asarray([0,0,-25])
         iter = 0
         acc_e_last = np.zeros(3)
         v_error_e = np.zeros(3)
         p_error_e = np.zeros(3)
         v_error_e_last = np.zeros(3)
         p_error_e_last = np.zeros(3)
-        # rigid
-        omega_tx = PID_Controller(2.9, 0, 0.3, -0.1, 0.1)
-        omega_ty = PID_Controller(0.1, 0 , 0, -0.08, 0.08)
+        # omega_tx = PID_Controller(2.9, 0, 0.3, -0.1, 0.1)
+        omega_tx = PID_Controller(1.5, 0, 0.1, -0.1, 0.1)
+        omega_ty = PID_Controller(2.0, 0, 0.1, -0.08, 0.08)
         omega_tz = PID_Controller(0.0 ,0 , 0, -0.08, 0.08)
         omega = np.zeros(3)
-        omega_last = np.zeros(3)
         v_error = np.zeros(3)
         # v_error_last = np.zeros(3)
         dthx = [0,0,0,0,0,0,0,0,0,0]
-        dthy = [0,0,0,0,0]
+        dthy = [0,0,0,0,0,0,0,0,0,0]
         dthz = [0,0,0,0,0]
         while not rospy.is_shutdown():
             # print("omegax: ", omegax)
@@ -322,13 +288,17 @@ class TrajectoryClient:
             # print("v_error_e:", v_error_e)
             # print("v_error:", v_error)
             # rospy.loginfo("----------")
-            if np.abs(f_error_e[2]) < 1:
+            if np.abs(f_error_e[2]) < 10:
                 # thex = -np.sign(self.end_torque[0])*math.atan2(np.abs(self.end_force[1]),np.abs(self.end_force[2]))
                 # they = -np.sign(self.end_torque[1])*math.atan2(np.abs(self.end_force[0]),np.abs(self.end_force[2]))
                 # thez = 0
                 dthx.pop(0)
-                dthx.append(-self.end_torque[0]/np.abs(self.end_force[2]))
-                omega = qt2rot(self.end_rot).dot(np.asarray([omega_tx.get_output(sum(dthx)/10.0), omega_ty.get_output(0.0/f_desired_e[2]), omega_tz.get_output(0.0/f_desired_e[2])]))
+                # dthx.append(-self.end_torque[0]/np.abs(self.end_force[2]))
+                dthx.append(np.sign(self.end_force[1])*math.atan2(np.abs(self.end_force[1]),np.abs(self.end_force[2])))
+                dthy.pop(0)
+                dthy.append(-np.sign(self.end_force[0])*math.atan2(np.abs(self.end_force[0]),np.abs(self.end_force[2])))
+                # omega = qt2rot(self.end_rot).dot(np.asarray([0.0, omega_ty.get_output(sum(dthy)/10.0), omega_tz.get_output(0.0/f_desired_e[2])]))
+                omega = qt2rot(self.end_rot).dot(np.asarray([omega_tx.get_output(sum(dthx)/10.0), omega_ty.get_output(sum(dthy)/10.0), omega_tz.get_output(0.0/f_desired_e[2])]))
                 # else:
                 #     print("torqur control")
                 #     omega_tx.clear()
@@ -353,6 +323,8 @@ class TrajectoryClient:
                 # omega_last = np.asarray([0,0,0])
                 dthx.pop(0)
                 dthx.append(0)
+                dthy.pop(0)
+                dthy.append(0)
                 omega = qt2rot(self.end_rot).dot(np.asarray([omega_tx.get_output(sum(dthx)/10.0), omega_ty.get_output(0.0/f_desired_e[2]), omega_tz.get_output(0.0/f_desired_e[2])]))
                 ang_vel = np.linalg.pinv(getjacobi(self.jsp)).dot(np.asarray(v_error.tolist() + omega.tolist()).T).tolist()
             # print("ang_vel:",ang_vel)

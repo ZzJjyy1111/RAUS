@@ -162,22 +162,23 @@ class TrajectoryClient:
         # Change to your own needs if desired
         pose_list = [
             geometry_msgs.Pose(
-                geometry_msgs.Vector3(0.4, -0.1, 0.4), geometry_msgs.Quaternion(0, 0, 0, 1)
+                geometry_msgs.Vector3(0.4, -0.1, 0.4), geometry_msgs.Quaternion(-0.7010573846499781, 0.7010573846499781, -0.09229595564125723, 0.09229595564125723)
             ),
-            geometry_msgs.Pose(
-                geometry_msgs.Vector3(0.4, -0.1, 0.6), geometry_msgs.Quaternion(0, 0, 0, 1)
-            ),
-            geometry_msgs.Pose(
-                geometry_msgs.Vector3(0.4, 0.3, 0.6), geometry_msgs.Quaternion(0, 0, 0, 1)
-            ),
-            geometry_msgs.Pose(
-                geometry_msgs.Vector3(0.4, 0.3, 0.4), geometry_msgs.Quaternion(0, 0, 0, 1)
-            ),
-            geometry_msgs.Pose(
-                geometry_msgs.Vector3(0.4, -0.1, 0.4), geometry_msgs.Quaternion(0, 0, 0, 1)
-            ),
+            # geometry_msgs.Pose(
+            #     geometry_msgs.Vector3(0.4, -0.1, 0.6), geometry_msgs.Quaternion(0, 0, 0, 1)
+            # ),
+            # geometry_msgs.Pose(
+            #     geometry_msgs.Vector3(0.4, 0.3, 0.6), geometry_msgs.Quaternion(0, 0, 0, 1)
+            # ),
+            # geometry_msgs.Pose(
+            #     geometry_msgs.Vector3(0.4, 0.3, 0.4), geometry_msgs.Quaternion(0, 0, 0, 1)
+            # ),
+            # geometry_msgs.Pose(
+            #     geometry_msgs.Vector3(0.4, -0.1, 0.4), geometry_msgs.Quaternion(0, 0, 0, 1)
+            # ),
         ]
-        duration_list = [5.0, 10.0, 15.0, 20.0, 25.0]
+        # duration_list = [5.0, 10.0, 15.0, 20.0, 25.0]
+        duration_list = [15.0]
         for i, pose in enumerate(pose_list):
             point = CartesianTrajectoryPoint()
             point.pose = pose

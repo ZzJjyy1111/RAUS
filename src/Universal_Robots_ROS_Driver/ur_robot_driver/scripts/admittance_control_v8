@@ -1,0 +1,344 @@
+#!/usr/bin/env python
+
+# -- BEGIN LICENSE BLOCK ----------------------------------------------
+# Copyright 2021 FZI Forschungszentrum Informatik
+# Created on behalf of Universal Robots A/S
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# -- END LICENSE BLOCK ------------------------------------------------
+#
+# ---------------------------------------------------------------------
+# !\file
+#
+# \author  Felix Exner mauch@fzi.de
+# \date    2021-08-05
+#
+#
+# ---------------------------------------------------------------------
+import sys
+
+import rospy
+import os
+import actionlib
+from std_msgs.msg import Float64MultiArray
+from inverseKinematicsUR5 import InverseKinematicsUR5, transformRobotParameter
+from control_msgs.msg import FollowJointTrajectoryAction, FollowJointTrajectoryGoal
+from trajectory_msgs.msg import JointTrajectoryPoint
+from controller_manager_msgs.srv import SwitchControllerRequest, SwitchController
+from controller_manager_msgs.srv import LoadControllerRequest, LoadController
+from controller_manager_msgs.srv import ListControllers, ListControllersRequest
+import geometry_msgs.msg as geometry_msgs
+import tf2_msgs.msg as tf2_msgs
+import sensor_msgs.msg as sensor_msgs
+import math
+import numpy as np
+from numpy import cos
+from numpy import sin
+from cartesian_control_msgs.msg import (
+    FollowCartesianTrajectoryAction,
+    FollowCartesianTrajectoryGoal,
+    CartesianTrajectoryPoint,
+)
+
+# Compatibility for python2 and python3
+if sys.version_info[0] < 3:
+    input = raw_input
+
+# If your robot description is created with a tf_prefix, those would have to be adapted
+JOINT_NAMES = [
+    "shoulder_pan_joint",
+    "shoulder_lift_joint",
+    "elbow_joint",
+    "wrist_1_joint",
+    "wrist_2_joint",
+    "wrist_3_joint",
+]
+
+# All of those controllers can be used to execute joint-based trajectories.
+# The scaled versions should be preferred over the non-scaled versions.
+JOINT_TRAJECTORY_CONTROLLERS = [
+    "scaled_pos_joint_traj_controller",
+    "scaled_vel_joint_traj_controller",
+    "pos_joint_traj_controller",
+    "vel_joint_traj_controller",
+    "forward_joint_traj_controller",
+    "joint_group_vel_controller"
+]
+
+# All of those controllers can be used to execute Cartesian trajectories.
+# The scaled versions should be preferred over the non-scaled versions.
+CARTESIAN_TRAJECTORY_CONTROLLERS = [
+    "pose_based_cartesian_traj_controller",
+    "joint_based_cartesian_traj_controller",
+    "forward_cartesian_traj_controller",
+]
+
+# We'll have to make sure that none of these controllers are running, as they will
+# be conflicting with the joint trajectory controllers
+CONFLICTING_CONTROLLERS = ["joint_group_vel_controller", "twist_controller"]
+
+ALL_CONTROLLERS = ["scaled_pos_joint_traj_controller",
+    "scaled_vel_joint_traj_controller",
+    "pos_joint_traj_controller",
+    "vel_joint_traj_controller",
+    "forward_joint_traj_controller",
+    "joint_group_vel_controller",
+    "pose_based_cartesian_traj_controller",
+    "joint_based_cartesian_traj_controller",
+    "forward_cartesian_traj_controller",
+    "joint_group_vel_controller", 
+    "twist_controller"]
+
+def qt2rpy(q):
+    [x,y,z,w] = q
+
+    alpha = math.atan2(2 * (w * x + y * z), 1 - 2 * (x ** 2 + y ** 2))
+    beta = math.asin(2 * (w * y - z * x))
+    gamma = math.atan2(2 * (w * z + x * y), 1 - 2 * (y ** 2 + z ** 2))
+    
+    return np.asarray([alpha,beta,gamma])
+
+
+def rot2qt(m):
+    #m:array
+    w = ((np.trace(m) + 1) ** 0.5) / 2
+    x = (m[2][1] - m[1][2]) / (4 * w)
+    y = (m[0][2] - m[2][0]) / (4 * w)
+    z = (m[1][0] - m[0][1]) / (4 * w)
+    return x,y,z,w
+
+def qt2rot(q):
+    #q:list
+    [x,y,z,w] = q
+    return np.array([[1-2*y*y-2*z*z, 2*x*y-2*z*w, 2*x*z+2*y*w],
+             [2*x*y+2*z*w, 1-2*x*x-2*z*z, 2*y*z-2*x*w],
+             [2*x*z-2*y*w, 2*y*z+2*x*w, 1-2*x*x-2*y*y]])
+
+class TrajectoryClient:
+    """Small trajectory client to test a joint trajectory"""
+
+    def __init__(self):
+        rospy.init_node("admittance_control")
+        self.end_transl = np.zeros(3)
+        self.end_rot = np.zeros(4)
+        self.end_force = np.zeros(3)
+        self.end_corforce = np.zeros(3)
+        self.end_torque = np.zeros(3)
+        self.end_cortorque = np.zeros(3)
+
+        self.jsp = np.zeros(6)
+        self.jsv = np.zeros(6)
+        self.jse = np.zeros(6)
+
+        califile = open("TFSensorCaliData",'r')
+        self.f_offset = np.asarray(map(float,califile.readline().split()))
+        self.t_offset = np.asarray(map(float,califile.readline().split()))
+        self.grav = map(float,califile.readline().split())[0]
+        self.gcp = np.asarray(map(float,califile.readline().split()))
+        califile.close()
+        # print(self.f_offset)
+        # print(self.t_offset)
+        # print(self.grav)
+        # print(self.gcp)
+        
+        # self.f_offset = np.zeros(3)
+        # self.t_offset = np.zeros(3)
+        # self.grav = 0
+        # self.gcp = np.zeros(3)
+
+
+        timeout = rospy.Duration(10)
+        self.control_rate = 250
+        self.switch_srv = rospy.ServiceProxy(
+            "controller_manager/switch_controller", SwitchController
+        )
+        self.load_srv = rospy.ServiceProxy("controller_manager/load_controller", LoadController)
+        self.list_srv = rospy.ServiceProxy("controller_manager/list_controllers", ListControllers)
+        self.js_topic = rospy.Subscriber("/joint_states", sensor_msgs.JointState, self.js_callback, queue_size=10)
+        # self.no_load_force
+        self.wrench_topic = rospy.Subscriber("/ethdaq_data", geometry_msgs.WrenchStamped, self.wrench_callback, queue_size=10)
+        self.tf_topic = rospy.Subscriber("/tf", tf2_msgs.TFMessage, self.tf_callback, queue_size=10)
+        try:
+            self.switch_srv.wait_for_service(timeout.to_sec())
+        except rospy.exceptions.ROSException as err:
+            rospy.logerr("Could not reach controller switch service. Msg: {}".format(err))
+            sys.exit(-1)
+        self.joint_trajectory_controller = ALL_CONTROLLERS[10]
+
+        while not self.switch_controller(self.joint_trajectory_controller):
+            rospy.loginfo("starting controller......")
+        rospy.loginfo("starting controller succeed!")
+        self.pub=rospy.Publisher('/twist_controller/command', geometry_msgs.Twist, queue_size=1)
+        # self.cartesian_trajectory_controller = CARTESIAN_TRAJECTORY_CONTROLLERS[0]
+
+    def wrench_callback(self,end_wrench):
+
+        self.end_force[0] = end_wrench.wrench.force.x - self.f_offset[0] - np.linalg.inv(qt2rot(self.end_rot)).dot(np.asarray([0,0,-self.grav]))[0]
+        if np.abs(self.end_force[0]) < 0.01:
+            self.end_force[0] = 0
+        self.end_force[1] = end_wrench.wrench.force.y - self.f_offset[1] - np.linalg.inv(qt2rot(self.end_rot)).dot(np.asarray([0,0,-self.grav]))[1]
+        if np.abs(self.end_force[1]) < 0.01:
+            self.end_force[1] = 0
+        self.end_force[2] = end_wrench.wrench.force.z - self.f_offset[2] - np.linalg.inv(qt2rot(self.end_rot)).dot(np.asarray([0,0,-self.grav]))[2]
+        if np.abs(self.end_force[2]) < 0.16:
+            self.end_force[2] = 0
+        
+        self.end_torque[0] = end_wrench.wrench.torque.x - self.t_offset[0] - np.cross(self.gcp,np.linalg.inv(qt2rot(self.end_rot)).dot(np.asarray([0,0,-self.grav])))[0]
+        if np.abs(self.end_torque[0]) < 0.000025:
+            self.end_torque[0] = 0
+        self.end_torque[1] = end_wrench.wrench.torque.y - self.t_offset[1] - np.cross(self.gcp,np.linalg.inv(qt2rot(self.end_rot)).dot(np.asarray([0,0,-self.grav])))[1]
+        if np.abs(self.end_torque[1]) < 0.000025:
+            self.end_torque[1] = 0
+        self.end_torque[2] = end_wrench.wrench.torque.z - self.t_offset[2] - np.cross(self.gcp,np.linalg.inv(qt2rot(self.end_rot)).dot(np.asarray([0,0,-self.grav])))[2]
+        if np.abs(self.end_torque[2]) < 0.000001:
+            self.end_torque[2] = 0
+
+        self.end_corforce = qt2rot(self.end_rot).dot(self.end_force)
+        self.end_cortorque = qt2rot(self.end_rot).dot(self.end_torque)
+        # print(self.end_corforce)
+        
+
+    def tf_callback(self,end_tf):
+        if end_tf.transforms[0].child_frame_id == "tool0_controller":
+            self.end_transl[0] = end_tf.transforms[0].transform.translation.x
+            self.end_transl[1] = end_tf.transforms[0].transform.translation.y
+            self.end_transl[2] = end_tf.transforms[0].transform.translation.z
+            self.end_rot[0] = end_tf.transforms[0].transform.rotation.x
+            self.end_rot[1] = end_tf.transforms[0].transform.rotation.y
+            self.end_rot[2] = end_tf.transforms[0].transform.rotation.z
+            self.end_rot[3] = end_tf.transforms[0].transform.rotation.w
+
+    def js_callback(self,joint_states):
+        self.jsp = joint_states.position
+        self.jsv = joint_states.velocity
+        self.jse = joint_states.effort
+
+
+    def my_shutdown_handler(self):
+        msg_stop = geometry_msgs.Twist()
+        msg_stop.linear.x = 0
+        msg_stop.linear.y = 0
+        msg_stop.linear.z = 0
+        msg_stop.angular.x = 0
+        msg_stop.angular.y = 0
+        msg_stop.angular.z = 0
+        self.pub.publish(msg_stop)
+
+    def admittance_control(self):
+
+        
+        rate = rospy.Rate(self.control_rate)
+        # rospy.sleep(2)
+        rospy.loginfo("start admittance control")
+
+        MF = np.diag([8, 8, 8])
+        DF = np.diag([600, 600, 600])
+        KF = np.diag([0, 0, 0])
+        MT = np.diag([1, 1 ,1])
+        DT = np.diag([20, 20, 20])
+        KT = np.diag([0, 0, 0])
+        f_desired_e = np.asarray([0,0,0]) #np.asarray([0,0,20])
+        t_desired = np.asarray([0,0,0])
+        iter = 0
+        acc = np.zeros(3)
+        acc_last = np.zeros(3)
+        v_error = np.zeros(3)
+        p_error = np.zeros(3)
+        v_error_last = np.zeros(3)
+        p_error_last = np.zeros(3)
+        alpha = np.zeros(3)
+        alpha_last = np.zeros(3)
+        omega_error = np.zeros(3)
+        theta_error = np.zeros(3)
+        omega_error_last = np.zeros(3)
+        theta_error_last = np.zeros(3)
+        rospy.on_shutdown(self.my_shutdown_handler)
+        while not rospy.is_shutdown():
+            print("time:",rospy.Time.now().to_sec())
+            iter += 1
+            f_desired = qt2rot(self.end_rot).dot(f_desired_e)
+            f_error = - f_desired + self.end_corforce
+            t_error = - t_desired + self.end_cortorque
+            print(t_error)
+            acc = np.linalg.inv(MF).dot((f_error - DF.dot(v_error_last) - KF.dot(p_error_last)))
+            alpha = np.linalg.inv(MT).dot((t_error - DT.dot(omega_error_last) - KT.dot(theta_error_last)))
+            v_error = v_error_last + acc_last/self.control_rate
+            p_error = p_error_last + v_error_last/self.control_rate
+            omega_error = omega_error_last + alpha_last/self.control_rate
+            theta_error = theta_error_last + omega_error_last/self.control_rate
+            msg = geometry_msgs.Twist()
+            msg.linear.x = v_error[0]
+            msg.linear.y = v_error[1]
+            msg.linear.z = v_error[2]
+            msg.angular.x = omega_error[0]
+            msg.angular.y = omega_error[1]
+            msg.angular.z = omega_error[2]
+            self.pub.publish(msg)
+            acc_last = acc
+            v_error_last = v_error
+            p_error_last = p_error
+            alpha_last = alpha
+            omega_error_last = omega_error
+            theta_error_last = theta_error
+            rate.sleep()
+
+
+
+
+
+
+    
+    def switch_controller(self, target_controller):
+        """Activates the desired controller and stops all others from the predefined list above"""
+        
+        target_loaded_flag = 0
+        target_start_flag = 0
+        other_controllers = ALL_CONTROLLERS
+        other_controllers.remove(target_controller)
+        srv = ListControllersRequest()
+        response = self.list_srv(srv)
+        for controller in response.controller:
+            if controller.name == target_controller:
+                target_loaded_flag = 1
+                if controller.state == "running":
+                    target_start_flag = 1
+            else:
+                if not controller.state == "running":
+                    other_controllers.remove(controller.name)
+
+        if target_loaded_flag == 0:
+            srv = LoadControllerRequest()
+            srv.name = target_controller
+            self.load_srv(srv)
+
+        srv = SwitchControllerRequest()
+        srv.stop_controllers = other_controllers
+        if target_start_flag == 0:
+            srv.start_controllers = [target_controller]
+        else:
+            srv.start_controllers = []
+        srv.strictness = SwitchControllerRequest.BEST_EFFORT
+        self.switch_srv(srv)
+
+        srv = ListControllersRequest()
+        response = self.list_srv(srv)
+        for controller in response.controller:
+            if controller.name == target_controller and controller.state == "running":
+                return 1
+        return 0
+  
+
+    
+if __name__ == "__main__":
+    client = TrajectoryClient()
+    client.admittance_control()
