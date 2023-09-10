@@ -1,0 +1,23 @@
+#!/home/miniconda2/envs/ultrasound/bin python3.6
+
+import rospy
+import geometry_msgs.msg as geometry_msgs
+
+def trytest():
+    test_pub = rospy.Publisher('/twist_controller/command', geometry_msgs.Twist, queue_size=1)
+    pub_msg = geometry_msgs.Twist()
+    pub_msg.linear.x = 1
+    pub_msg.linear.y = 2
+    pub_msg.linear.z = 3
+    pub_msg.angular.x = 4
+    pub_msg.angular.y = 5
+    pub_msg.angular.z = 6
+    rate = rospy.Rate(200)
+
+    while not rospy.is_shutdown():
+        test_pub.publish(pub_msg)
+        rate.sleep()
+
+
+if __name__ == "__main__":
+    trytest()
